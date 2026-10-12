@@ -1,185 +1,148 @@
-# AI驱动的智能测试助手
+# TestMind
 
-## 基于 RAG + 多智能体 + 模型微调的接口测试全流程系统
+**面向软件测试团队的 AI 增强与质量协作平台。** TestMind 将项目知识、需求与测试资产组织为可追溯的工作流，通过检索和多步骤 AI 编排辅助测试人员理解问题、查询项目知识、设计测试用例，并逐步连接现有测试管理与工程系统。
 
-> **双重身份**：本目录项目同时作为 **① 毕业设计（毕设）核心项目** 与 **② 简历作品集 · 项目3**。  
-> 由「AI驱动的智能测试知识库助手（RAG）」与「AI驱动的智能接口测试助手（多智能体）」合并而成。  
-> **毕设路径**：路径 A（结合 7 年测试经验，推荐）× 全流程项目（+10，强烈推荐）—— 既贴合背景又有最高加分。
+TestMind 不替代测试人员作出质量决策：用例、外部系统写入和执行等关键操作应保留授权、审核与结果追踪。
 
----
+## 主流程
 
-## 一、项目定位
+![TestMind 主流程图：统一入口、业务子图和独立后台工作流](https://files.catbox.moe/l2tfwx.png)
 
-面向软件测试工程师的大模型应用。把"文档 / 缺陷 / 用例"变成可被大模型调用的知识，把"用例生成 → 执行 → 分析 → 报告"变成由 Agent + 微调模型编排的自动化流水线。**四大能力**：
+图中绿色表示代码层已有实现，不代表已完成生产部署或真实外部系统联调；无色表示纳入当前交付范围但尚未整体完成；红色表示暂缓。
 
-1. **测试知识库（RAG）**：历史缺陷 / 测试用例 / 接口文档向量化，混合检索 + 重排序 + 定量评估（MRR / NDCG）。
-2. **接口测试用例自动生成**：从 Swagger / Postman / 需求文档解析 API，LangGraph 多智能体生成正向 / 负向 / 边界用例。
-3. **用例执行与失败根因分析**：Python + requests 执行；失败分析由 **微调的缺陷根因分类模型 + Agent** 联合给出根因与修复建议。
-4. **自动化闭环**：N8N 定时触发 → 执行 → 报告 → 飞书通知，无人值守。
+## 当前 MVP 范围
 
----
+当前 MVP 聚焦以下能力：
 
-## 二、为什么适合你（答辩 / 简历双用）
+- **统一对话入口**：拼写纠错、意图识别、按意图分流；问答分支执行指代消解。
+- **项目知识问答**：区分直接回答与基于项目证据的检索回答，支持来源引用。
+- **共享 RAG 能力**：围绕授权项目和文档版本进行检索、排序与证据组织。
+- **测试用例生成流程**：解析输入资料，形成可评审的用例草稿，并为后续受控写入留出边界。
+- **图谱查询**：以服务端权限约束查询和指标访问。
+- **独立后台工作流**：知识资料入库，以及外部关系数据同步和图谱投影。
 
-- **7 年测试 / 性能专项经验** → 深刻理解接口测试痛点（用例设计耗时、漏测、结果分析繁琐），项目有真实业务价值，路径 A 复用经验最占便宜。
-- 技术栈 Python（已熟练）、API 调用、自动化、性能测试 → 完全可驾驭。
-- 评委 / 面试官看到的是 **业务洞察 + LLM 工程能力（RAG + 微调 + 多智能体 + 自动化）**，而非简单 CRUD。
+脚本生成与审批、隔离执行、执行报告、自动调度、UI/专项测试、完整测试计划和修复回归报告暂不属于当前 MVP。MVP 是分阶段交付范围，不等于 PRD 全量验收完成。
 
----
+## 架构概览
 
-## 三、技术架构
-
-```mermaid
-flowchart TB
-    U[用户 / 飞书] -->|提问 / 触发| UI[Streamlit UI + 飞书机器人]
-    UI --> ORCH[LangGraph 编排层]
-    ORCH --> P1[解析 Agent<br>Swagger/Postman/需求 → API结构]
-    ORCH --> P2[用例生成 Agent<br>正向/负向/边界用例]
-    ORCH --> P3[执行 Agent<br>Python+requests 并发]
-    ORCH --> P4[失败分析 Agent<br>根因分类+修复建议]
-    P2 --> RAG[(RAG 知识库<br>历史缺陷/用例/文档)]
-    RAG --> HR[混合检索<br>向量+BM25+重排序]
-    P4 --> FT[微调根因模型<br>LLaMA Factory / Qwen2.5]
-    P3 --> REP[报告生成 + 飞书通知]
-    REP --> N8N[N8N 定时调度<br>无人值守闭环]
-    style FT fill:#ffe0b2,stroke:#e65100
+```text
+Streamlit 工作台
+       │ HTTP
+       ▼
+FastAPI API ── 服务端认证与项目授权
+       │
+       ├── LangGraph 对话主图
+       │      ├── 问答 / 共享 RAG
+       │      ├── 用例生成（逐步接入）
+       │      └── 受控图谱查询（逐步接入）
+       │
+       ├── 知识入库 API + 独立 Worker
+       └── 关系同步 API + 独立 Worker
+              │
+              ├── PostgreSQL：业务数据、版本、任务与工作流检查点
+              ├── Milvus：知识片段向量检索
+              └── Neo4j：关系数据投影与查询
 ```
 
-> 橙色节点（微调模型）是本项目相对 FinWise / MCP 工具箱的**唯一差异化能力**，也是毕设「全流程 +10」的关键。
+后台 Worker 与交互请求分开运行。PostgreSQL 保存权威业务状态；Milvus 和 Neo4j 分别服务于知识检索与关系查询。生产部署需接入可信身份、权限和外部系统配置。
 
+## 技术栈
 
+**应用与 API**
 
----
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat&logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white)
+![Uvicorn](https://img.shields.io/badge/Uvicorn-4051B5?style=flat)
+![Pydantic](https://img.shields.io/badge/Pydantic-E92063?style=flat&logo=pydantic&logoColor=white)
 
-## 四、技术栈（满足毕设强制要求 + 加分）
+Streamlit 提供本地工作台；FastAPI、Uvicorn 和 Pydantic 支撑 HTTP 接口、输入校验与服务端授权边界。
 
-- **强制**：LangChain 1.x · LangGraph · RAG · Chroma（向量库）
-- **核心**：LLaMA Factory（LoRA 微调）· bge-small-zh（Embedding）· bge-reranker-v2（重排序）· DeepSeek / Qwen API
-- **应用（全 Python 3.10+）**：Python / requests · Streamlit（进程内调用 Python 模块）· N8N（外部调度）· 飞书多维表格（FastAPI 仅作可选 HTTP 桥）
-- **加分拓展**：CrewAI（用例生成-评审双 Agent，冲「多智能体框架 +5」）· Coze（对话式测试助手 MVP，冲「多项目 +5」）
+**AI 与工作流**
 
----
+![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C?style=flat&logo=langgraph&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=flat&logo=langchain&logoColor=white)
+![DeepSeek](https://img.shields.io/badge/DeepSeek-API-4D6BFE?style=flat)
+![BGE-M3](https://img.shields.io/badge/BGE--M3-Embedding-00897B?style=flat)
+![BGE Reranker](https://img.shields.io/badge/BGE-Reranker-7B1FA2?style=flat)
 
-## 五、核心功能（技术深度展示）
+LangGraph 和 LangChain 管理对话状态与多步骤编排；模型服务用于语言理解与生成，本地 BGE-M3 和 BGE Reranker 用于向量生成与重排。
 
-- **多智能体协作（LangGraph）**：解析 / 生成 / 执行 / 分析 四 Agent 状态机编排，支持失败重试与人工介入点。
-- **模型微调闭环（LLaMA Factory）**：Label Studio 标注历史缺陷根因 → 微调 Qwen2.5 分类模型 → 接入失败分析 Agent，实现"标注→训练→应用"全链路。
-- **RAG 增强用例生成**：生成用例时检索历史缺陷，自动补充易错边界 / 异常场景（如"该接口空参数曾返回 500，请增加空参数用例"）。
-- **混合检索 + 重排序 + 评估体系**：向量 + BM25 融合、Cross-encoder 重排序、MRR / NDCG 定量评估，RAG 检索 Top-3 准确率 ≥ 90%。
-- **自动化闭环**：N8N 定时 → 执行 → 报告 → 飞书通知。
+**数据与检索**
 
----
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat&logo=postgresql&logoColor=white)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-D71F00?style=flat&logo=sqlalchemy&logoColor=white)
+![Alembic](https://img.shields.io/badge/Alembic-646464?style=flat)
+![Milvus](https://img.shields.io/badge/Milvus-00A1EA?style=flat&logo=milvus&logoColor=white)
+![Neo4j](https://img.shields.io/badge/Neo4j-4581C3?style=flat&logo=neo4j&logoColor=white)
 
-## 六、量化业务价值（对齐毕设成功案例）
+PostgreSQL 保存业务数据、版本和检查点；SQLAlchemy 与 Alembic 支撑数据访问和迁移；Milvus 提供知识检索，Neo4j 提供关系投影与查询。
 
-| 指标               | 目标 / 实测         | 说明                         |
-| ---------------- | --------------- | -------------------------- |
-| RAG 检索 Top-3 准确率 | ≥ 90%           | 对齐成功案例「RAG 准确率 90%+」       |
-| 用例生成效率           | 提升 ≥ 70%        | 单接口用例从人工 30min → 自动 < 5min |
-| 缺陷根因分类准确率        | ≥ 85%           | 微调模型在测试集上的分类准确率            |
-| 漏测场景补充           | 每个接口平均 +3 条异常用例 | RAG 检索历史缺陷自动补场景            |
-| 回归测试人力           | 下降 ≥ 60%        | N8N 无人值守闭环替代每日手动           |
+**开发与质量检查**
 
----
+![uv](https://img.shields.io/badge/uv-DE5FE9?style=flat&logo=uv&logoColor=white)
+![pytest](https://img.shields.io/badge/pytest-0A9EDC?style=flat&logo=pytest&logoColor=white)
+![Ruff](https://img.shields.io/badge/Ruff-D7FF64?style=flat&logo=ruff&logoColor=black)
 
-## 七、与作品集其他项目的分工（避免重复）
+uv 管理依赖与虚拟环境，pytest 和 Ruff 用于测试及代码检查。
 
-| 项目           | 主打能力                         | 本项目的差异点                |
-| ------------ | ---------------------------- | ---------------------- |
-| FinWise      | 复杂 Agent 编排（业务型）             | 本项目的 Agent 聚焦"测试工作流"   |
-| MCP工具箱       | 工具 / 协议                      | 本项目调用被测系统 API，不造工具     |
-| **本项目（项目3）** | **RAG + 微调 + 多智能体 + 全流程自动化** | **唯一覆盖"模型微调 + 端到端闭环"** |
+## 当前实现状态
 
----
+仓库包含聊天与问答链路、知识入库和 Worker、关系同步及图谱相关模块，以及对应单元测试。代码已具备相应组件，不等于所有 MVP 流程已经端到端验收。
 
-## 八、毕设加分项映射（最大化策略）
+当前仍需按部署逐项完成真实数据库、模型服务、授权提供方、禅道契约及其他外部系统的配置和联调。真实身份接入、真实项目权限和生产数据上的端到端验收，不能由本地单元测试代替。脚本生成、审批、隔离执行等暂缓能力也不应视为已交付。
 
-| 加分项                          | 分值      | 本项目体现                                                   | 优先级    |
-| ---------------------------- | ------- | ------------------------------------------------------- | ------ |
-| 全流程项目（标注→训练→应用→N8N）          | **+10** | Label Studio 标注 → LLaMA Factory 微调 → LangGraph 应用 → N8N | **必做** |
-| N8N 智能体编排                    | +5      | 定时测试 → 报告 → 飞书通知                                        | **必做** |
-| 模型训练 / 微调                    | +5      | LLaMA Factory 微调缺陷根因模型                                  | **必做** |
-| 多智能体框架（CrewAI/AutoGen/Swarm） | +5      | 用例生成-评审双 Agent（CrewAI）                                  | 争取     |
-| Coze / Dify MVP              | +5      | 对话式测试助手 MVP（独立小项目）                                      | 可选     |
+## 本地开发
 
-> **保底**：必做三项 = 全流程(+10) + N8N(+5) + 微调(+5) = **+20**，配合基础分稳过（及格线 70）。  
-> **冲满**：再加 CrewAI(+5) 或 Coze MVP(+5) = **+25**。  
-> ⚠️ 注意：LangGraph 多 Agent 是毕设**强制技术**，不计入「多智能体框架 +5」；该加分需用 CrewAI/AutoGen/Swarm，本项目用 CrewAI 实现"生成+评审"双 Agent 争取。
+### 环境准备
 
----
-
-## 九、快速开始（毕设提交模板）
-
-### 当前已接入的问答链路
-
-主图已接入统一 `dialogue` 子图：JEV 一次识别业务意图与回答策略，子图确定性分流到普通回答或项目检索回答。
-检索复用本地 BGE-M3 和 BGE-Reranker，Milvus 使用独立 TestMind 集合；没有授权上下文或证据时明确反馈。
-配置、集合字段、权限接入和测试方法见 [问答子图与本地检索](docs/09-问答子图与本地检索.md)。
-该实现不等于已完成语料入库、登录权限系统或实库端到端联调。
-
-### 环境要求
-
-- Python 3.11+ · uv · Git；PostgreSQL 用于检查点，Milvus 用于知识查询
-- API Key：DeepSeek / Qwen（`.env` 配置）
-
-### 安装步骤
-
-模型统一放在本项目的 `pretrained_model/bge-m3` 和 `pretrained_model/bge-reranker-base`。
-权重由 Git 忽略，不依赖其他仓库目录；首次克隆后按 [本地模型准备说明](pretrained_model/README.md) 下载。
+- Python 3.11 或更新版本
+- [uv](https://docs.astral.sh/uv/)
+- PostgreSQL；知识检索流程还需要 Milvus
+- 按需配置模型服务凭据和本地 BGE 模型
 
 ```powershell
 uv sync
-# 使用 .env.example 中的配置项设置 .env，保留已有配置与凭据。
-uv run python -m testmind.main
-# 离线单测与本地模型验证
-uv run pytest tests/unit -q
-uv run python scripts/smoke_local_retrieval.py
+Copy-Item .env.example .env
 ```
 
-### 项目结构
+按实际环境编辑 `.env`：设置 PostgreSQL 连接、模型凭据和所需服务地址。`.env` 含本机配置，不要提交；`.env.example` 只提供配置项示例。BGE 权重需按 [`pretrained_model/README.md`](pretrained_model/README.md) 单独准备，不会随 Git 仓库下载。
 
-```
-project/
-├── data/            # 测试文档 / 缺陷库 / 接口文档 / 标注数据
-├── src/             # 源代码（rag / agents / executor / finetune / n8n）
-├── config/          # 模型 / 检索 / 微调配置
-├── tests/           # 单元测试 + 评估脚本（MRR/NDCG）
-├── notebooks/       # 微调实验记录
-├── requirements.txt
-└── README.md
-```
+### 启动
 
-### 演示截图
-
-- [图1] Streamlit 知识库问答界面（带引用来源）
-- [图2] LangGraph 四 Agent 用例生成-执行链路
-- [图3] N8N 定时触发 → 飞书报告推送
-
----
-
-## 十、作者信息
-
-### 知识入库工作流
-
-知识工作流已拆分为独立 FastAPI 后台与 PostgreSQL 租约 Worker：上传、版本、质量报告、重试、重建索引、删除、激活和审计均通过服务端接口完成。读写接口都要求服务端授权上下文；未配置授权提供方时 fail closed。PostgreSQL 的 active version mapping 是检索权威，Milvus `is_active` 用于辅助过滤与对账。
-
-本地启动 Streamlit 操作页：
+API、知识 Worker 和 Streamlit 工作台分别在独立终端启动：
 
 ```powershell
-uv run streamlit run frontend/streamlit/app.py
+uv run python -m testmind.main
 ```
 
-知识迁移使用独立的 `knowledge` schema 和 `knowledge_alembic.ini`，避免与 LangGraph checkpoint 迁移冲突。生产环境应配置共享对象存储（MinIO/S3）和可信授权提供方；ZenTao 事件适配器默认关闭，启用前需要配置签名密钥及外部事件契约。
+```powershell
+uv run python -m testmind.worker.knowledge_worker
+```
 
-- 姓名：[杨泽森]
-- 岗位方向：大模型应用开发
-- 项目角色：独立设计 + 实现（架构 / 微调 / 工程化）
+```powershell
+$env:TESTMIND_API_URL = "http://127.0.0.1:26104"
+uv run streamlit run frontend/streamlit/app.py --server.port 8501
+```
 
----
+知识入库还需要完成 PostgreSQL 迁移、知识库预置和本地开发授权配置。完整步骤见项目维护者提供的本地 Docker 与知识入库验收 SOP；该文档当前不包含在公开 Git 仓库中。
 
-## 相关
+### 测试与检查
 
-- [[PRD|项目需求文档（速览）]]
-- [[一周排期|毕设 Day1-7 排期（速览）]]
-- [[面试亮点|面试 / 答辩怎么讲这个项目]]
-- [docs/ 敏捷开发流程文档](docs/00-敏捷开发文档索引.md)（立项书 / PRD / Backlog / TDD / Sprint / 验收测试）
+```powershell
+uv run pytest -q
+uv run ruff check src tests
+```
+
+需要外部数据库或服务的集成测试应在配置好对应环境后单独运行；跳过的集成测试不代表外部服务验收通过。
+
+## 安全说明
+
+- 聊天和项目资源访问使用服务端认证上下文；客户端传入的用户或项目字段不能作为授权凭据。
+- 知识与关系数据应按项目和有效版本隔离；生产环境不得使用仅供本地开发的 Mock 授权。
+- 禅道事件适配器默认关闭；启用前需配置签名密钥、外部事件契约和访问控制。
+- 不要将 `.env`、访问令牌、数据库凭据或模型权重提交到仓库。
+
+## 项目资料
+
+产品需求、技术设计和可编辑流程图用于项目设计与评审，目前保存在维护者本地的 `docs/` 目录，该目录被 Git 忽略，不会随本仓库发布。此 README 根据这些资料整理；如需公开 PRD、TDD 或流程图源文件，应先单独确认文档发布范围并调整仓库跟踪策略。

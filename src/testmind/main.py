@@ -1,0 +1,125 @@
+"""FastAPI application entrypoint."""
+
+import asyncio
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from testmind.api.router import api_router
+from testmind.core.config import get_config
+from testmind.core.security import (
+    AuthContext,
+    MockAuthorizationProvider,
+    RequestStateAuthorizationProvider,
+)
+from testmind.infrastructure.graph_sync.query import GraphQueryService, Neo4jGraphReader
+from testmind.infrastructure.graph_sync.runtime import GraphSettings
+from testmind.infrastructure.graph_sync.source import SignedGraphSource
+from testmind.infrastructure.jev.jev_client import JevClient
+from testmind.infrastructure.knowledge.source_events import ZenTaoEventAdapter
+from testmind.infrastructure.knowledge.source_storage import create_source_storage
+from testmind.infrastructure.milvus.retrieval import MilvusRetrievalService
+from testmind.infrastructure.postgres.graph_sync_repository import GraphSyncRepository
+from testmind.infrastructure.postgres.knowledge_repository import KnowledgeRepository
+from testmind.infrastructure.postgres.postgresql_client import open_postgresql_client
+from testmind.orchestration.builder import create_main_graph
+
+
+def selector_loop_factory(**_: object) -> asyncio.AbstractEventLoop:
+    """Use an event loop compatible with psycopg async on Windows."""
+    return asyncio.SelectorEventLoop()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    jev_client = JevClient.from_config()
+    retrieval = MilvusRetrievalService(get_config())
+    config = get_config()
+    graph_settings = GraphSettings.from_env()
+    graph_driver = None
+    if not getattr(app.state, "authorization_provider", None):
+        if config.knowledge_auth_mode == "mock":
+            app.state.authorization_provider = MockAuthorizationProvider(
+                AuthContext(
+                    user_id=config.knowledge_mock_user_id,
+                    authorized_project_ids=frozenset(
+                        value.strip()
+                        for value in config.knowledge_mock_project_ids.split(",")
+                        if value.strip()
+                    ),
+                    authorized_knowledge_base_ids=frozenset(
+                        value.strip()
+                        for value in config.knowledge_mock_base_ids.split(",")
+                        if value.strip()
+                    ),
+                )
+            )
+        elif config.knowledge_auth_mode == "request_state":
+            app.state.authorization_provider = RequestStateAuthorizationProvider()
+        else:
+            app.state.authorization_provider = None
+    try:
+        async with open_postgresql_client() as postgres:
+            app.state.postgresql = postgres
+            app.state.knowledge_repository = KnowledgeRepository(postgres.pool)
+            app.state.graph_sync_repository = GraphSyncRepository(postgres.pool)
+            app.state.graph_query_service = None
+            app.state.graph_event_source = None
+            app.state.graph_pull_enabled = graph_settings.enabled and bool(graph_settings.snapshot_url)
+            if graph_settings.enabled:
+                from neo4j import AsyncGraphDatabase
+
+                graph_driver = AsyncGraphDatabase.driver(
+                    graph_settings.uri,
+                    auth=(graph_settings.read_user, graph_settings.read_password),
+                )
+                app.state.graph_query_service = GraphQueryService(
+                    app.state.graph_sync_repository,
+                    Neo4jGraphReader(graph_driver, database=graph_settings.database),
+                )
+                if graph_settings.event_secret:
+                    app.state.graph_event_source = SignedGraphSource(
+                        graph_settings.source_instance, secret=graph_settings.event_secret,
+                        project_mapping=graph_settings.project_mapping,
+                    )
+            if not getattr(app.state, "source_storage", None):
+                app.state.source_storage = create_source_storage(config)
+            if not getattr(app.state, "zentao_event_adapter", None):
+                app.state.zentao_event_adapter = (
+                    ZenTaoEventAdapter(secret=config.zentao_event_secret, enabled=config.zentao_event_enabled)
+                    if config.zentao_event_secret
+                    else None
+                )
+            app.state.jev_client = jev_client
+            app.state.retrieval = retrieval
+            app.state.graph = create_main_graph(
+                checkpointer=postgres.checkpointer,
+                jev_client=jev_client,
+                retriever=retrieval,
+            )
+            yield
+    finally:
+        if graph_driver is not None:
+            await graph_driver.close()
+        try:
+            await retrieval.aclose()
+        finally:
+            await jev_client.aclose()
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(api_router)
+
+if __name__ == "__main__":
+    import uvicorn
+
+    config = get_config()
+    uvicorn.run(
+        "testmind.main:app",
+        host=config.app_host,
+        port=config.app_port,
+        loop="testmind.main:selector_loop_factory",
+        log_config=None,
+        log_level=config.log_level.lower(),
+    )
+

@@ -1,0 +1,85 @@
+[project]
+name = "testmind"
+version = "0.1.0"
+description = "AI 驱动的智能测试助手：基于 RAG 与 LangGraph 多智能体的接口测试全流程系统"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.20.0",
+    "fastapi>=0.142.2",
+    "httpx>=0.28.1",
+    "langchain>=1.4.3",
+    "langchain-deepseek>=1.1.1",
+    "langchain-milvus>=0.4.0",
+    "langchain-openai>=1.6.7",
+    "langchain-text-splitters>=1.1.2",
+    "langgraph>=1.2.12",
+    "langgraph-checkpoint-postgres>=3.1.2",
+    "minio>=7.2.18",
+    "neo4j>=6.3.1",
+    "psycopg[binary,pool]>=3.3.6",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "pymilvus[model]>=3.0.2",
+    "flagembedding==1.4.2",
+    "pypdf>=6.19.0",
+    "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.32",
+    "rank-bm25>=0.2.2",
+    "redis>=8.1.0",
+    "rich>=13.0.0",
+    "rouge-score>=0.1.2",
+    "sentence-transformers>=6.1.0",
+    "sqlalchemy>=2.1.1",
+    "streamlit>=1.64.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff",
+]
+
+
+# ---- Pytest：默认发现 tests/，异步用例自动管理 event loop ----
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external services (需要外部服务的集成测试)",
+]
+
+# ---- Ruff：统一代码风格 ----
+[tool.ruff]
+src = ["src"]            # 分析路径，便于识别第一方代码
+line-length = 100        # 行长上限
+target-version = "py311" # 语法/规则按 Python 3.11
+
+# ---- Mypy：严格类型检查 ----
+[tool.mypy]
+python_version = "3.11"
+strict = true                 # 启用严格模式
+mypy_path = "src"             # 将 src 加入模块搜索路径
+explicit_package_bases = true # 明确包根，减少隐式命名空间误判
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["E501"]   # 测试文件的中文注释允许超过行宽限制
+"scripts/**/*.py" = ["E501"] # 脚本文件的文档字符串允许超过行宽限制
+
+# 主包位于 src/testmind；uv sync 后以可编辑方式链接，
+# 任意工作目录均可 `from testmind.state import ...`
+[tool.hatch.build.targets.wheel]
+packages = ["src/testmind"]

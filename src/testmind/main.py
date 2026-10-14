@@ -85,13 +85,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.graph_sync_repository = GraphSyncRepository(postgres.pool)
             app.state.graph_query_service = None
             app.state.graph_event_source = None
-            app.state.graph_pull_enabled = graph_settings.enabled and bool(graph_settings.snapshot_url)
+            app.state.graph_pull_enabled = graph_settings.enabled and (graph_settings.demo_mode or bool(graph_settings.snapshot_url))
             if graph_settings.enabled:
                 from neo4j import AsyncGraphDatabase
 
                 graph_driver = AsyncGraphDatabase.driver(
                     graph_settings.uri,
-                    auth=(graph_settings.read_user, graph_settings.read_password),
+                    auth=(graph_settings.read_user, graph_settings.read_password) if not graph_settings.demo_mode else None,
                 )
                 app.state.graph_query_service = GraphQueryService(
                     app.state.graph_sync_repository,
@@ -114,7 +114,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.retrieval = retrieval
             if config.demo_mode:
                 from testmind.demo.runtime import create_demo_graph
-                app.state.graph = create_demo_graph(postgres.checkpointer, app.state.task_repository, shared_retrieval)
+                app.state.graph = create_demo_graph(postgres.checkpointer, app.state.task_repository, shared_retrieval, app.state.graph_query_service)
             else:
                 app.state.graph = create_main_graph(
                     checkpointer=postgres.checkpointer,

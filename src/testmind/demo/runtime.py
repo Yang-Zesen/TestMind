@@ -37,6 +37,8 @@ class DemoIntentNode(BaseNode):
 
     async def process(self, state: GraphState) -> GraphState:
         query = state["corrected_query"].lower()
+        if query.startswith("graph-query:") or any(word in query for word in ("图谱", "关系查询", "graph query")):
+            return {"intent":"graph_query", "answer_mode":None, "last_error":{}}
         unclear = query in {"?", "help", "帮我", "这个"}
         if query.startswith(PREFIX) or "生成用例" in query or "设计用例" in query:
             return {"intent":"test_case_generation", "answer_mode":None, "last_error":{}}
@@ -112,7 +114,8 @@ async def demo_proposal(query: str) -> ToolProposal:
 
 
 def create_demo_graph(
-    checkpointer: Any, repository: TaskRepository | None = None, retriever: Retriever | None = None
+    checkpointer: Any, repository: TaskRepository | None = None, retriever: Retriever | None = None,
+    graph_service: Any | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     readonly = (
         ReadonlyToolNode(
@@ -130,6 +133,7 @@ def create_demo_graph(
         llm=DemoModel(),
         readonly_node=readonly,
         retriever=retriever,
+        graph_query_node=_graph_node(repository, graph_service),
         case_design_node=CaseDesignNode(CaseRepository(repository.pool), retriever if isinstance(retriever, SharedRetrievalService) else None) if repository is not None else None,
         node_overrides={
             "spell_correction": DemoInputNode(),
@@ -137,3 +141,10 @@ def create_demo_graph(
             "intent_recognition": DemoIntentNode(),
         },
     )
+
+
+def _graph_node(repository: Any, service: Any) -> Any:
+    if repository is None or service is None:
+        return None
+    from testmind.workflows.graph_query import GraphQueryNode
+    return GraphQueryNode(repository, service)

@@ -39,4 +39,5 @@ class GraphState(TypedDict, total=False):
     citations: list[dict[str, Any]]
     insufficient_evidence: bool
     case_asset_ids: list[str]
+    graph_result: dict[str, Any]
     last_error: dict[str, Any]

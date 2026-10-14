@@ -55,7 +55,18 @@ async def authorized_task(request: Request, task_id: str, auth: AuthContext) -> 
     if task is None or task["user_id"] != auth.user_id:
         raise HTTPException(404, "task_not_found")
     require_project_access(auth, task["project_id"])
+    await require_graph_result_access(request, task, auth)
     return task
+
+
+async def require_graph_result_access(request: Request, task: dict[str, Any], auth: AuthContext) -> None:
+    result = task["result"].get("graph_result")
+    if not result:
+        return
+    graph = getattr(request.app.state, "graph_sync_repository", None)
+    grant = await graph.permission(task["project_id"], auth.user_id) if graph is not None else None
+    if grant is None or grant["permission_version"] != result.get("permission_version"):
+        raise HTTPException(403, "graph_result_access_changed")
 
 
 @router.post("", status_code=202)
@@ -82,10 +93,16 @@ async def submit(
 
 @router.get("")
 async def list_tasks(request: Request, auth: Authorized) -> list[dict[str, Any]]:
-    return [
-        view(task)
-        for task in await repository(request).list_tasks(auth.user_id, auth.authorized_project_ids)
-    ]
+    items = []
+    for task in await repository(request).list_tasks(auth.user_id, auth.authorized_project_ids):
+        try:
+            await require_graph_result_access(request, task, auth)
+        except HTTPException as exc:
+            if exc.status_code != 403:
+                raise
+            continue
+        items.append(view(task))
+    return items
 
 
 @router.get("/{task_id}")

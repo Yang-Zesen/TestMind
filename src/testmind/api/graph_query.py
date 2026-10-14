@@ -62,7 +62,7 @@ async def maintain_graph(
 class GraphQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str = Field(min_length=1, max_length=200)
-    query_type: Literal["entities", "relationships"] = "entities"
+    query_type: Literal["entities", "relationships", "metrics"] = "entities"
     entity_type: Literal["project", "member", "requirement", "test_case", "bug", "script", "test_run"] | None = None
     limit: int = Field(default=50, ge=1, le=200)
     cursor: str | None = Field(default=None, max_length=160, pattern=r"^[0-9a-f]{64}(:[0-9a-f]{64}:[a-z_]+)?$")
@@ -80,28 +80,17 @@ async def graph_projects(request: Request, context: Authorized) -> list[dict[str
 
 @router.get("/metrics")
 async def graph_metrics(project_id: str, request: Request, context: Authorized) -> dict[str, Any]:
-    from testmind.infrastructure.graph_sync.metrics import calculate_metrics
-
+    from testmind.infrastructure.graph_sync.query import GraphQueryService
     require_project_access(context, project_id)
-    repo = repository(request)
-    grant = await repo.permission(project_id, context.user_id)
-    if grant is None:
-        raise HTTPException(403, "Project membership is not authorized")
-    owner_id = context.user_id if grant["role"] == "employee" else None
+    service = GraphQueryService(repository(request), None)
     try:
-        events = await repo.authorized_snapshot(project_id, owner_id)
+        return dict(await service.metrics(project_id, context))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    result = calculate_metrics(events)
-    # Aggregate job health is maintenance-only; employees must not see project-wide workload.
-    if grant["can_maintain"]:
-        result["sync_health"] = await repo.project_health(project_id)
-    await repo.audit_query(project_id=project_id, actor_id=context.user_id,
-                           query_id="metrics", query_type="metrics")
-    if grant != await repo.permission(project_id, context.user_id):
-        raise HTTPException(403, "Project permission changed")
-    return {"project_id": project_id, "permission_version": grant["permission_version"],
-            "snapshot_kind": "current_assets", **result}
+    except PermissionError as exc:
+        raise HTTPException(403, "Graph access revoked or denied") from exc
+    except TimeoutError as exc:
+        raise HTTPException(503, "Graph query dependency timed out") from exc
 
 
 def repository(request: Request) -> Any:
@@ -147,6 +136,8 @@ async def query_graph(
         return dict(await service.query(query, context))
     except PermissionError as exc:
         raise HTTPException(403, "Graph access revoked or denied") from exc
+    except TimeoutError as exc:
+        raise HTTPException(503, "Graph query dependency timed out") from exc
 
 
 @router.get("/integrations/sync-jobs/{job_id}")
@@ -157,3 +148,19 @@ async def get_sync_job(job_id: str, request: Request, context: Authorized) -> di
     require_project_access(context, job["project_id"])
     await require_maintenance(request, context, job["project_id"])
     return {key: job[key] for key in ("id", "project_id", "status", "attempt_count", "error_code")}
+
+
+@router.get("/graph/maintenance-preview")
+async def maintenance_preview(project_id: str, request: Request, context: Authorized) -> dict[str, Any]:
+    require_project_access(context, project_id)
+    await require_maintenance(request, context, project_id)
+    return dict(await repository(request).cleanup_preview(project_id))
+
+
+@router.get("/graph/sync-status")
+async def sync_status(project_id: str, request: Request, context: Authorized) -> dict[str, Any]:
+    require_project_access(context, project_id)
+    await require_maintenance(request, context, project_id)
+    repo = repository(request)
+    return {"project_id":project_id, "provenance":await repo.provenance(project_id,maintainer=True),
+            "health":await repo.project_health(project_id)}

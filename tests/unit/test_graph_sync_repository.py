@@ -97,6 +97,8 @@ async def test_revoked_grant_is_checked_inside_event_write_transaction():
         await GraphSyncRepository(Pool(connection)).register_event(event(), actor_id="svc", authorized_user="svc")
     assert not any("INSERT" in sql for sql, _ in connection.queries)
     assert any("project_memberships" in sql and "FOR UPDATE" in sql for sql, _ in connection.queries)
+    assert "pg_advisory_xact_lock" in connection.queries[0][0]
+    assert connection.queries[0][1] == ("project:p1",)
 
 
 async def test_expired_rebuild_lease_is_checked_against_wall_clock():

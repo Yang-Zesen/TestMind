@@ -28,6 +28,7 @@ _RESULT_FIELDS = {
     "current_stage",
     "answer_mode",
     "case_asset_ids",
+    "graph_result",
 }
 
 
@@ -74,6 +75,7 @@ class TaskWorker:
             "status": "running",
             "answer": "",
             "citations": [],
+            "graph_result": {},
             "retry_count": 0,
             "last_error": {},
         }
@@ -206,15 +208,25 @@ async def run(*, once: bool = False, task_id: str | None = None) -> None:
         import os
         if os.getenv("TESTMIND_PRELOAD_RAG", "false").lower() == "true":
             await asyncio.to_thread(backend._initialize)
+        from neo4j import AsyncGraphDatabase
+
+        from testmind.infrastructure.graph_sync.query import GraphQueryService, Neo4jGraphReader
+        from testmind.infrastructure.graph_sync.runtime import GraphSettings
+        from testmind.infrastructure.postgres.graph_sync_repository import GraphSyncRepository
+        settings = GraphSettings.from_env()
+        driver = AsyncGraphDatabase.driver(settings.uri, auth=None) if settings.enabled and settings.demo_mode else None
+        graph_service = GraphQueryService(GraphSyncRepository(postgres.pool), Neo4jGraphReader(driver,database=settings.database)) if driver is not None else None
         worker = TaskWorker(
             repository,
-            create_demo_graph(postgres.checkpointer, repository, retrieval),
+            create_demo_graph(postgres.checkpointer, repository, retrieval, graph_service),
             knowledge,
         )
         while True:
             executed = await worker.run_once(task_id=task_id)
             if once:
                 await backend.aclose()
+                if driver is not None:
+                    await driver.close()
                 return
             if not executed:
                 await asyncio.sleep(0.5)

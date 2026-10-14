@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -32,6 +34,7 @@ class GraphSettings:
     project_mapping: dict[str, str]
     snapshot_url: str
     snapshot_token: str = field(repr=False)
+    demo_mode: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> GraphSettings:
@@ -55,8 +58,11 @@ class GraphSettings:
             project_mapping=mapping,
             snapshot_url=env.get("GRAPH_SNAPSHOT_URL", ""),
             snapshot_token=env.get("GRAPH_SNAPSHOT_TOKEN", ""),
+            demo_mode=env.get("TESTMIND_DEMO_MODE", "false").lower() == "true",
         )
-        if value.enabled and (not all((value.read_user, value.read_password,
+        if value.demo_mode and (env.get("APP_ENV", "development") != "development" or urlparse(value.uri).hostname not in {"localhost", "127.0.0.1"}):
+            raise ValueError("Demo graph runtime requires development and loopback Neo4j")
+        if value.enabled and not value.demo_mode and (not all((value.read_user, value.read_password,
                                       value.write_user, value.write_password))
                               or value.read_user == value.write_user):
             raise ValueError("Enabled graph runtime requires separate read/write credentials")
@@ -99,16 +105,24 @@ async def run_worker() -> None:
         "autocommit": True, "row_factory": dict_row, "prepare_threshold": 0,
     }) as pool, AsyncGraphDatabase.driver(settings.uri, auth=(
             settings.write_user, settings.write_password
-        )) as driver, httpx.AsyncClient(timeout=30, follow_redirects=False) as http:
+        ) if not settings.demo_mode else None) as driver, httpx.AsyncClient(timeout=30, follow_redirects=False) as http:
         projection = Neo4jProjection(driver, database=settings.database)
         await projection.ensure_constraints()
         repository = GraphSyncRepository(pool)
+        demo_source = None
+        if settings.demo_mode:
+            from testmind.infrastructure.graph_sync.demo_source import (
+                DemoGraphSource,
+                seed_demo_graph,
+            )
+            await seed_demo_graph(pool)
+            demo_source = DemoGraphSource(pool)
         def factory(generation: str) -> Neo4jProjection:
             return Neo4jProjection(driver, database=settings.database, generation=generation)
         worker = GraphSyncWorker(
             repository, ActiveGenerationProjection(repository, factory),
             maintenance=GraphMaintenance(repository, factory),
-            poller=GraphPoller(repository, SnapshotGraphSource(
+            poller=GraphPoller(repository, demo_source, source_instance="demo-zentao-graph") if demo_source is not None else GraphPoller(repository, SnapshotGraphSource(
                 http, url=settings.snapshot_url, token=settings.snapshot_token,
                 source_instance=settings.source_instance, project_mapping=settings.project_mapping,
             ), source_instance=settings.source_instance) if settings.snapshot_url else None,
@@ -116,7 +130,21 @@ async def run_worker() -> None:
         previous = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, lambda *_: worker.stop())
         try:
-            await worker.run()
+            if demo_source is None:
+                await worker.run()
+            else:
+                while not worker.stopping.is_set():
+                    worked = False
+                    try:
+                        for project in ("demo-project", "other-project"):
+                            for resource in ("project", "member", "requirement", "test_case", "bug"):
+                                await worker.poller.run(project, resource)
+                        worked = await worker.run_once()
+                    except Exception:  # noqa: BLE001 - daemon boundary, no raw dependency error text.
+                        logging.getLogger(__name__).error("demo_graph_dependency_unavailable")
+                    if not worked:
+                        with suppress(TimeoutError):
+                            await asyncio.wait_for(worker.stopping.wait(), 2)
         finally:
             signal.signal(signal.SIGINT, previous)
 

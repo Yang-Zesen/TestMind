@@ -121,6 +121,7 @@ class BaseNode(ABC):
             "waiting_review": "waiting_review",
             "insufficient_evidence": "no_usable_evidence",
             "failed": "failed",
+            "denied": "permission_denied",
         }
         last_error = updates.get("last_error", {})
         error_code = last_error.get("code") if isinstance(last_error, dict) else None

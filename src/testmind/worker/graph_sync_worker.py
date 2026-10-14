@@ -40,8 +40,8 @@ class GraphSyncWorker:
                 worked = await self.run_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("graph_sync_queue_unavailable")
+            except Exception:  # noqa: BLE001 - preserve the worker without logging source payloads.
+                logger.error("graph_sync_queue_unavailable")
                 worked = False
             if not worked:
                 with suppress(TimeoutError):
@@ -55,6 +55,12 @@ class GraphSyncWorker:
         heartbeat: asyncio.Task[bool] | None = None
         work: asyncio.Task[Any] | None = None
         try:
+            authorized_user = job["payload"].get("authorized_user")
+            lease = {**identity, **({"authorized_user": authorized_user} if authorized_user is not None else {})}
+            if job.get("operation") in {"pull", "rebuild", "reconcile"} and authorized_user is not None:
+                grant = await self.repository.permission(job["project_id"], authorized_user)
+                if grant is None or not grant["can_maintain"]:
+                    raise PermissionError("Maintenance permission was revoked")
             if job.get("operation") == "pull":
                 if self.poller is None:
                     raise ValueError("pull adapter is not configured")
@@ -63,17 +69,23 @@ class GraphSyncWorker:
                 if self.maintenance is None:
                     raise ValueError("maintenance handler is not configured")
                 work = asyncio.create_task(
-                    self.maintenance.rebuild(job["project_id"], generation=job["payload"]["generation"], lease=identity)
+                    self.maintenance.rebuild(job["project_id"], generation=job["payload"]["generation"],
+                                             lease=lease)
                 )
             elif job.get("operation") == "reconcile":
                 if self.maintenance is None:
                     raise ValueError("maintenance handler is not configured")
-                work = asyncio.create_task(self.maintenance.reconcile(job["project_id"]))
+                work = asyncio.create_task(self.maintenance.reconcile(
+                    job["project_id"], lease=lease
+                ))
             else:
                 event = GraphEvent.model_validate(job["payload"])
                 work = asyncio.create_task(self.projection.apply(event))
             heartbeat = asyncio.create_task(self._heartbeat(identity))
-            await asyncio.wait((work, heartbeat), return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait((work, heartbeat), timeout=300,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                raise TimeoutError("Graph operation deadline exhausted")
             if heartbeat.done():
                 await heartbeat
                 logger.warning("graph_sync_lease_lost", extra={"job_id": job["id"]})
@@ -82,10 +94,12 @@ class GraphSyncWorker:
             await self.repository.finish(**identity)
         except ValidationError:
             await self.repository.fail(**identity, permanent=True, error_code="invalid_event")
+        except PermissionError:
+            await self.repository.fail(**identity, permanent=True, error_code="maintenance_permission_revoked")
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("graph_sync_projection_failed", extra={"job_id": job["id"]})
+        except Exception:  # noqa: BLE001 - persist a bounded failure code, never source contents.
+            logger.error("graph_sync_projection_failed", extra={"job_id": job["id"]})
             await self.repository.fail(**identity, permanent=False, error_code="projection_failed")
         finally:
             for task in (work, heartbeat):

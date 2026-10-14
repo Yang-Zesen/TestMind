@@ -54,7 +54,10 @@ class GraphSyncRepository:
                    max(updated_at) FILTER (WHERE status='succeeded') AS last_projected_at
                    FROM graph_sync.projection_outbox WHERE project_id=%s""", (project_id,)
             )
-            return dict(await cursor.fetchone())
+            result = dict(await cursor.fetchone())
+            if result["last_projected_at"] is not None:
+                result["last_projected_at"] = result["last_projected_at"].isoformat()
+            return result
 
     async def watermark(self, *, source_instance: str, project_id: str, resource_type: str) -> Any:
         async with self.pool.connection() as connection:
@@ -101,13 +104,17 @@ class GraphSyncRepository:
             raise ValueError("Unsupported maintenance operation")
         job_id = str(uuid4())
         async with self.pool.connection() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"project:{project_id}",)
+            )
             if authorized_user is not None:
                 await self._lock_maintenance_grant(connection, project_id, authorized_user)
             await connection.execute(
                 """INSERT INTO graph_sync.projection_outbox
                    (id,project_id,revision,payload,operation)
                    VALUES (%s,%s,0,%s,%s)""",
-                (job_id, project_id, Jsonb({"generation": str(uuid4()), "resource_type": resource_type}), operation),
+                (job_id, project_id, Jsonb({"generation": str(uuid4()), "resource_type": resource_type,
+                                          "authorized_user": authorized_user}), operation),
             )
             await connection.execute(
                 """INSERT INTO graph_sync.audit_events
@@ -137,11 +144,14 @@ class GraphSyncRepository:
     async def switch_generation(
         self, project_id: str, generation: str, fingerprints: dict[str, str],
         *, job_id: str | None = None, claim_token: str | None = None,
+        authorized_user: str | None = None,
     ) -> bool:
         async with self.pool.connection() as connection, connection.transaction():
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"project:{project_id}",)
             )
+            if authorized_user is not None:
+                await self._lock_maintenance_grant(connection, project_id, authorized_user)
             if job_id is not None:
                 lease = await connection.execute(
                     """SELECT id FROM graph_sync.projection_outbox
@@ -156,6 +166,9 @@ class GraphSyncRepository:
             events = [GraphEvent.model_validate(row["payload"]) for row in await cursor.fetchall()]
             if {event.entity_key: event.fingerprint for event in events} != fingerprints:
                 return False
+            previous = await connection.execute("SELECT generation FROM graph_sync.project_generations WHERE project_id=%s", (project_id,))
+            old = await previous.fetchone()
+            old_generation = str(old["generation"]) if old else "initial"
             switched = await connection.execute(
                 """INSERT INTO graph_sync.project_generations (project_id,generation)
                    SELECT %s,%s WHERE %s::text IS NULL OR EXISTS (
@@ -168,12 +181,38 @@ class GraphSyncRepository:
             )
             if await switched.fetchone() is None:
                 raise PermissionError("Rebuild lease expired before activation")
+            if old_generation != generation:
+                await connection.execute("INSERT INTO graph_sync.retired_generations(project_id,generation) VALUES (%s,%s) ON CONFLICT DO NOTHING", (project_id, old_generation))
             return True
+
+    async def provenance(self, project_id: str, *, maintainer: bool = False) -> dict[str, Any]:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute("SELECT max(updated_at) AS source_updated_at FROM graph_sync.entities WHERE project_id=%s", (project_id,))
+            row = await cursor.fetchone()
+            updated = row["source_updated_at"] if row else None
+            cursor = await connection.execute("SELECT source_instance,resource_type,cursor,updated_at FROM graph_sync.sync_watermarks WHERE project_id=%s ORDER BY source_instance,resource_type", (project_id,))
+            watermarks = [dict(value) for value in await cursor.fetchall()] if maintainer else []
+        return {"generation":await self.generation(project_id),"source_updated_at":updated.isoformat() if updated else None,
+                "watermarks":[{**item,"updated_at":item["updated_at"].isoformat()} for item in watermarks],
+                "history_available":False,"source_mode":"authoritative_pg_projection"}
+
+    async def cleanup_preview(self, project_id: str) -> dict[str, Any]:
+        async with self.pool.connection() as connection:
+            cursor = await connection.execute("""SELECT r.generation,r.retired_at,
+                r.retired_at < now()-interval '24 hours' AS eligible
+                FROM graph_sync.retired_generations r
+                WHERE r.project_id=%s AND r.generation<>COALESCE(
+                    (SELECT generation FROM graph_sync.project_generations WHERE project_id=%s),'initial')
+                ORDER BY retired_at DESC""", (project_id,project_id))
+            generations = [dict(row) for row in await cursor.fetchall()]
+        return {"dry_run":True,"project_id":project_id,"active_generation":await self.generation(project_id),
+                "retention_hours":24,"physical_cleanup_enabled":False,"retired_generations":generations,
+                "policy":"Retain at least 24 hours; active generation and unregistered rebuild candidates are never cleanup targets."}
 
     async def authorized_entities(self, project_id: str, owner_id: str | None) -> dict[str, Any]:
         async with self.pool.connection() as connection:
             cursor = await connection.execute(
-                """SELECT entity_key,revision FROM graph_sync.entities
+                """SELECT entity_key,revision,payload FROM graph_sync.entities
                    WHERE project_id=%s AND tombstoned=false AND (%s::text IS NULL OR owner_id=%s)""",
                 (project_id, owner_id, owner_id),
             )
@@ -262,12 +301,12 @@ class GraphSyncRepository:
     async def register_event(self, event: GraphEvent, *, actor_id: str,
                              authorized_user: str | None = None) -> dict[str, Any]:
         async with self.pool.connection() as connection, connection.transaction():
-            if authorized_user is not None:
-                await self._lock_maintenance_grant(connection, event.project_id, authorized_user)
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"project:{event.project_id}",),
             )
+            if authorized_user is not None:
+                await self._lock_maintenance_grant(connection, event.project_id, authorized_user)
             # Serialize receipts as well as resource revisions, including first insertion.
             for key in sorted((f"receipt:{event.source_instance}:{event.event_id}", event.entity_key)):
                 await connection.execute(
@@ -302,6 +341,17 @@ class GraphSyncRepository:
             receipt_id = str(uuid4())
             job_id = str(uuid4()) if decision == "accepted" else None
             if decision == "accepted":
+                if event.entity_type == "member":
+                    role = event.properties.get("role", "employee")
+                    maintain = event.properties.get("can_maintain", False)
+                    if role not in {"employee", "manager", "tse"} or not isinstance(maintain, bool):
+                        raise ValueError("invalid_source_membership")
+                    await connection.execute("""INSERT INTO graph_sync.project_memberships
+                        (project_id,user_id,role,can_maintain,revoked) VALUES (%s,%s,%s,%s,%s)
+                        ON CONFLICT(project_id,user_id) DO UPDATE SET role=EXCLUDED.role,
+                        can_maintain=EXCLUDED.can_maintain,revoked=EXCLUDED.revoked,
+                        permission_version=graph_sync.project_memberships.permission_version+1,
+                        updated_at=now()""", (event.project_id,event.source_id,role,maintain,event.operation=="delete"))
                 await connection.execute(
                     """INSERT INTO graph_sync.entities
                        (entity_key, project_id, source_instance, entity_type, source_id,

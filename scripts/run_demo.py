@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("component", choices=("api", "worker", "knowledge-worker"))
+    parser.add_argument("component", choices=("api", "worker", "knowledge-worker", "graph-worker"))
     parser.add_argument("--port", type=int, default=26104)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--task-id")
@@ -25,10 +25,14 @@ def main() -> None:
 
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             runner.run(run(once=args.once, task_id=args.task_id))
-    else:
+    elif args.component == "knowledge-worker":
         from testmind.worker.knowledge_worker import _run_configured_worker
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             runner.run(_run_configured_worker())
+    else:
+        from testmind.infrastructure.graph_sync.runtime import run_worker
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            runner.run(run_worker())
 
 
 if __name__ == "__main__":

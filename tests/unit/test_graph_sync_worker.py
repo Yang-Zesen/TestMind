@@ -74,3 +74,19 @@ async def test_queue_database_failure_does_not_terminate_worker_loop():
     worker.run_once = flaky
     await worker.run()
     assert len(attempts) == 3
+
+
+async def test_queued_maintenance_is_denied_after_revocation():
+    class Revoked(Repository):
+        async def claim(self, **kwargs):
+            return {"id":"j1", "claim_token":"token1", "project_id":"p1",
+                    "operation":"rebuild", "payload":{"authorized_user":"u1", "generation":"g2"}}
+
+        async def permission(self, project_id, user_id):
+            return None
+
+    repository = Revoked()
+    await GraphSyncWorker(repository, Projection()).run_once()
+    assert not repository.completed
+    assert repository.failed[0]["permanent"] is True
+    assert repository.failed[0]["error_code"] == "maintenance_permission_revoked"

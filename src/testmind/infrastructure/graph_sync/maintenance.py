@@ -4,20 +4,28 @@ from typing import Any
 from uuid import uuid4
 
 
+class ProjectionConflict(RuntimeError):
+    pass
+
+
 class GraphMaintenance:
     def __init__(self, repository: Any, projection_factory: Any) -> None:
         self.repository = repository
         self.projection_factory = projection_factory
 
-    async def reconcile(self, project_id: str) -> dict[str, Any]:
+    async def reconcile(self, project_id: str, *, lease: dict[str, str] | None = None) -> dict[str, Any]:
         for _ in range(10):
             generation = await self.repository.generation(project_id)
             projection = self.projection_factory(generation)
             snapshot = await self.repository.snapshot(project_id)
             superseded = False
             for event in snapshot:
-                if not await self._apply(projection, event):
-                    superseded = True
+                try:
+                    if not await self._apply(projection, event):
+                        superseded = True
+                except ProjectionConflict:
+                    # Repair corrupt equal revisions in a fresh generation, never erase an online fence.
+                    return await self.rebuild(project_id, lease=lease)
             if not superseded and generation == await self.repository.generation(project_id):
                 return {"generation": generation, "projected": len(snapshot)}
         raise RuntimeError("Reconciliation could not catch up")
@@ -29,7 +37,7 @@ class GraphMaintenance:
         current = await projection.current(event) if hasattr(projection, "current") else None
         if current and current["revision"] > event.revision:
             return False
-        raise RuntimeError("Projection rejected conflicting authoritative revision")
+        raise ProjectionConflict("Projection rejected conflicting authoritative revision")
 
     async def rebuild(self, project_id: str, *, generation: str | None = None,
                       lease: dict[str, str] | None = None) -> dict[str, Any]:

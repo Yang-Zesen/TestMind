@@ -63,3 +63,22 @@ def test_maintenance_does_not_accept_client_asserted_permissions(monkeypatch):
     monkeypatch.setattr(app.state, "graph_sync_repository", Repository(), raising=False)
     response = TestClient(app).post("/api/v1/graph/rebuild", json={"project_id": "p1"})
     assert response.status_code == 403
+
+
+async def test_saved_graph_result_denied_after_role_version_change(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from testmind.api.tasks import require_graph_result_access
+
+    class Repo:
+        async def permission(self, project_id, user_id):
+            return {"role":"employee", "can_maintain":False, "permission_version":2}
+
+    monkeypatch.setattr(app.state, "graph_sync_repository", Repo(), raising=False)
+    request = Request({"type":"http", "app":app})
+    task = {"project_id":"p1", "result":{"graph_result":{"permission_version":1, "items":["old_team_result"]}}}
+    with pytest.raises(HTTPException) as error:
+        await require_graph_result_access(request,task,AuthContext("user1",frozenset({"p1"}),frozenset()))
+    assert error.value.status_code == 403

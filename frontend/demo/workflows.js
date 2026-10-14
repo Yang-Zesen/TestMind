@@ -36,6 +36,8 @@ detail = async () => {
   for (const citation of task.result.citations || []) container.append(command(`${citation.title || '来源'} · ${citation.document_version}`, () => showEvidence(citation)));
   if (task.result.case_asset_ids?.length) await refreshCases();
   else { el('case-section').hidden = true; el('case-list').replaceChildren(); }
+  if (task.result.graph_result) renderGraph(task.result.graph_result);
+  else { graphCursor=null; el('graph-output').replaceChildren(); }
   return task;
 };
 async function refreshKnowledge() {
@@ -83,3 +85,32 @@ el('case-edit-form').onsubmit=async event=>{event.preventDefault();try{const bod
 el('editor-close').onclick=()=>el('case-editor').close();el('evidence-close').onclick=()=>el('evidence-dialog').close();el('knowledge-refresh').onclick=()=>refreshKnowledge().catch(fail);el('source-refresh').onclick=()=>refreshSources().catch(fail);el('source-new').onclick=newSource;el('case-refresh').onclick=()=>refreshCases().catch(fail);
 el('user').addEventListener('change',()=>{newSource();caseEdit=null;el('case-editor').close();el('evidence-dialog').close();el('case-list').replaceChildren();el('case-section').hidden=true;el('documents').replaceChildren();el('sources').replaceChildren();el('knowledge-jobs').replaceChildren();el('knowledge-status').textContent='';el('citations')?.replaceChildren();refreshKnowledge().catch(fail);refreshSources().catch(fail);});
 refreshKnowledge().catch(fail);refreshSources().catch(fail);
+
+let graphCursor = null, graphJobs = [], graphStatusVersion = 0;
+function renderGraph(result) {
+  el('graph-output').replaceChildren();
+  graphCursor = result.next_cursor || null;
+  if (result.items) {
+    const scroll=document.createElement('div'); scroll.className='scroll';
+    const table=document.createElement('table'),head=document.createElement('thead'),header=document.createElement('tr');
+    for(const label of ['来源','类型','标题','版本','关系'])header.append(text('th',label));head.append(header);table.append(head);
+    for(const item of result.items){const row=document.createElement('tr');let properties={};try{properties=JSON.parse(item.properties_json||'{}');}catch{}for(const value of [item.source_instance,item.entity_type,properties.title||item.source_id,item.revision,item.kind?`${item.kind} → ${item.target_title||item.target_source_id||item.target_key}`:''])row.append(text('td',String(value)));table.append(row);}
+    scroll.append(table);el('graph-output').append(scroll);
+    if(graphCursor)el('graph-output').append(command('下一页',()=>submitGraph(graphCursor)));
+    el('graph-status').textContent=`${result.items.length} 条 · ${result.stale?'投影有偏差':'当前授权范围'} · 权限版本 ${result.permission_version}`;
+  } else {
+    const row=document.createElement('div');row.className='row';for(const [key,label]of [['requirements','需求'],['test_cases','用例'],['bugs','缺陷'],['automated_cases','自动化用例']])row.append(text('p',`${label}：${result[key]??0}`));el('graph-output').append(row);
+    el('graph-status').textContent='当前资产快照 · 无历史趋势';
+  }
+  if(result.provenance)el('graph-output').append(text('small',`来源登记时间：${result.provenance.source_updated_at||'暂无'} · 代际：${result.provenance.generation}`));
+}
+async function submitGraph(cursor=null){const task=await api('/api/v1/tasks',{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({project_id:project(),session_id:el('session').value,query:'graph-query:'+JSON.stringify({query_type:el('graph-mode').value,entity_type:el('graph-type').value||null,limit:20,cursor})})});await refresh();await openTask(task.task_id);}
+el('graph-query-form').onsubmit=event=>{event.preventDefault();submitGraph().catch(fail);};
+async function refreshGraphAccess(){const user=el('user').value;const projects=await api('/api/v1/graph/projects');if(user!==el('user').value)return;el('graph-maintenance').hidden=!projects.find(item=>item.project_id===project())?.can_maintain;}
+async function refreshGraphStatus(){const user=el('user').value,version=++graphStatusVersion,jobs=[...graphJobs];const status=await api(`/api/v1/graph/sync-status?project_id=${project()}`);const fragment=document.createDocumentFragment();for(const job of jobs){const saved=await api(`/api/v1/integrations/sync-jobs/${job.job_id}`);if(user!==el('user').value||version!==graphStatusVersion)return;fragment.append(text('p',`${job.operation} · ${saved.status} · ${saved.error_code||saved.id.slice(0,8)}`));}if(user!==el('user').value||version!==graphStatusVersion)return;el('graph-status').textContent=`待处理 ${status.health.pending} · 最近投影 ${status.health.last_projected_at||'暂无'}`;if(status.provenance.watermarks.length)fragment.append(text('small',status.provenance.watermarks.map(item=>`${item.resource_type} 水位 ${JSON.stringify(item.cursor)}`).join(' · ')));el('graph-jobs').replaceChildren(fragment);}
+async function graphMaintenance(operation){const user=el('user').value;if(operation==='rebuild'&&!confirm('重建独立代际，校验通过后切换查询投影？'))return;if(operation==='pull'){for(const resource_type of ['project','member','requirement','test_case','bug']){if(user!==el('user').value)return;graphJobs.push({...await api('/api/v1/integrations/sync-runs',{method:'POST',body:JSON.stringify({project_id:project(),resource_type})}),operation:`同步 ${resource_type}`});}}else graphJobs.push({...await api(`/api/v1/graph/${operation}`,{method:'POST',body:JSON.stringify({project_id:project()})}),operation});await refreshGraphStatus();}
+for(const operation of ['pull','reconcile','rebuild'])el(`graph-${operation}`).onclick=async()=>{const buttons=['pull','reconcile','rebuild'].map(name=>el(`graph-${name}`));buttons.forEach(button=>button.disabled=true);try{await graphMaintenance(operation);}catch(e){fail(e);}finally{buttons.forEach(button=>button.disabled=false);}};
+el('graph-sync-refresh').onclick=()=>refreshGraphStatus().catch(fail);
+el('graph-cleanup-preview').onclick=async()=>{try{const user=el('user').value;const preview=await api(`/api/v1/graph/maintenance-preview?project_id=${project()}`);if(user!==el('user').value)return;el('evidence-title').textContent='旧代际清理预览';el('evidence-content').textContent=JSON.stringify(preview,null,2);el('evidence-dialog').showModal();}catch(e){fail(e);}};
+el('user').addEventListener('change',()=>{graphCursor=null;graphJobs=[];el('graph-output').replaceChildren();el('graph-jobs').replaceChildren();el('graph-status').textContent='';el('graph-maintenance').hidden=true;refreshGraphAccess().catch(fail);});
+refreshGraphAccess().catch(fail);

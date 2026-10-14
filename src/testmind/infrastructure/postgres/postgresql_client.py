@@ -3,8 +3,10 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -15,7 +17,7 @@ from testmind.core.config import get_config
 class PostgresSQLClient:
     """One application-scoped pool and its LangGraph checkpoint adapter."""
 
-    pool: AsyncConnectionPool
+    pool: AsyncConnectionPool[AsyncConnection[dict[str, Any]]]
     checkpointer: AsyncPostgresSaver
 
 
@@ -26,13 +28,15 @@ async def open_postgresql_client() -> AsyncIterator[PostgresSQLClient]:
     if not dsn:
         raise RuntimeError("缺少 POSTGRES_DSN 配置")
 
-    async with AsyncConnectionPool(
+    pool: AsyncConnectionPool[AsyncConnection[dict[str, Any]]] = AsyncConnectionPool(
         conninfo=dsn,
         min_size=1,
         max_size=5,
+        timeout=5,
         open=False,
-        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
-    ) as pool:
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row, "connect_timeout": 5, "options": "-c statement_timeout=5000"},
+    )
+    async with pool:
         checkpointer = AsyncPostgresSaver(pool)
         await checkpointer.setup()
         yield PostgresSQLClient(pool=pool, checkpointer=checkpointer)

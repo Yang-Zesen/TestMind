@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "source": "testing-guide.md",
+  "questions": [
+    {"query": "How does pytest find tests?", "expected_terms": ["test_"]},
+    {"query": "What does an assertion check?", "expected_terms": ["actual", "expected"]},
+    {"query": "Does disconnecting the event stream restart a task?", "expected_terms": ["subscription", "continues"]},
+    {"query": "What is the current exchange rate?", "expected": "insufficient_evidence"}
+  ]
+}

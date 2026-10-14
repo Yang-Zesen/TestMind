@@ -7,7 +7,8 @@ from alembic import context
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+if os.getenv("TESTMIND_DEMO_MODE", "false").lower() != "true":
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 config = context.config
 url = os.environ.get("GRAPH_SYNC_DSN") or os.environ.get("POSTGRES_DSN")
 if not url:

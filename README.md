@@ -127,6 +127,36 @@ uv run streamlit run frontend/streamlit/app.py --server.port 8501
 
 知识入库还需要完成 PostgreSQL 迁移、知识库预置和本地开发授权配置。完整步骤见项目维护者提供的本地 Docker 与知识入库验收 SOP；该文档当前不包含在公开 Git 仓库中。
 
+### 禅道 MCP
+
+已接入官方禅道 MCP 的七项读取操作，提供项目范围的 REST 查询接口和 LangGraph 工具工厂。
+从 `easysoft/zentao-mcp` 的 v1.0.2 Release 下载 Windows amd64 包，解压到
+`tmp/zentao-mcp/runtime`，使其中包含 `bin/` 和 `docs/`。本地文件不提交 Git。
+
+在 `.env` 中填写 CACHE（Apache Basic）和 TEST（禅道应用）账号凭据。先验证：
+
+```powershell
+uv run python scripts/run_zentao_mcp.py --smoke
+```
+
+长期运行 MCP 时，在独立终端执行：
+
+```powershell
+uv run python scripts/run_zentao_mcp.py
+```
+
+设置 `ZENTAO_MCP_ENABLED=true`、`ZENTAO_MCP_URL=http://127.0.0.1:9090/zentao/mcp`，
+再启动 TestMind API。运行脚本保留官方二进制，生成兼容 Schema 和七项 GET 白名单，
+并提供仅监听本机的 Basic 转发层。Token 由客户端获取并保存在内存。
+
+接口为 `GET /zentao/projects/{project_id}`、
+`GET /zentao/projects/{project_id}/{stories|testcases|bugs}` 及其 `/{identifier}` 详情路径。
+列表支持 `page` 和 `limit`。所有接口使用现有服务端 AuthContext；正式身份提供方仍待接入。
+本地沙箱可沿用已有 Mock 授权，授权项目设为 `1`，生产环境禁止 Mock。
+
+`create_zentao_tools(service, context)` 为 LangGraph 提供按请求绑定的项目、列表、详情工具。
+聊天主图尚未自动调用这些工具；用例创建、修改和删除也未启用。
+
 ### 测试与检查
 
 ```powershell
@@ -135,6 +165,45 @@ uv run ruff check src tests
 ```
 
 需要外部数据库或服务的集成测试应在配置好对应环境后单独运行；跳过的集成测试不代表外部服务验收通过。
+
+## 本地任务演示
+
+独立 Docker Compose 项目 `testmind` 提供 PostgreSQL、Milvus（etcd/MinIO）和 Neo4j。
+这组配置仅用于本机演示，端口绑定 `127.0.0.1`，不使用个人 `.env` 凭据。
+
+```powershell
+docker compose -f deploy/docker-compose.yaml up -d --wait
+uv run python scripts/init_demo.py
+uv run python scripts/run_demo.py api
+```
+
+另一终端运行独立任务 Worker：
+
+```powershell
+uv run python scripts/run_demo.py worker
+```
+
+工作台：`http://127.0.0.1:26104/demo`；健康/就绪：`/health`、`/ready`。
+演示身份 `demo-user` / `demo-other` 对应不同项目和知识库；服务端 PG 权限支持撤销。
+离线模型和禅道读取数据是明确标注的演示适配器，复用实际主图/问答子图和工具工厂。
+演示不会调用真实模型或执行外部写入。真实身份及完整 RAG、用例发布留给后续阶段。
+
+任务 API 提供幂等提交、查询、版本校验恢复、取消及有序 SSE；断线只结束订阅。
+Worker 使用 PG 租约/claim token，每输入版本最多 3 次执行；单次执行 60 秒，累计截止时间 180 秒保存在 PG，跨重启不重置；单节点默认 60 秒。
+模型依赖最多重试 2 次，输出契约最多修复 1 次；它们共享单次调用截止时间。
+输入 6000 字符、历史 16000 字符、节点状态 64000 字符、回答 12000 字符；这些是保守字符限制，不是精确 Token 计费。
+同一进程最多 8 个任务/聊天请求（含 SSE）、每来源每分钟 120 次；不表示分布式配额。
+结构化日志记录任务/尝试/节点/结束原因，默认不记录问答正文、工具返回体或隐藏思维链。
+
+```powershell
+./scripts/check_demo.ps1
+uv run python scripts/smoke_demo.py
+docker compose -f deploy/docker-compose.yaml down
+```
+
+停止 Compose 保留命名卷；再次启动后任务、事件及 Checkpoint 仍在。
+审批基础提供版本/hash 绑定和失效，真实资产审批/发布由后续工作包接入。
+CI 运行单元测试和新增底座的定向 Ruff，真实依赖回归使用上述本地脚本。
 
 ## 安全说明
 

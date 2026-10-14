@@ -7,9 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 
+from testmind.core.config import get_config
 from testmind.core.security import AuthContext, get_auth_context
-from testmind.models.retrieval import RetrievalScope
-from testmind.orchestration.context import RequestContext
+from testmind.services.request_context import (
+    ContextAccessDenied,
+    ContextUnavailable,
+    RequestContextService,
+)
 
 router = APIRouter()
 
@@ -28,21 +32,23 @@ async def chat(
     request: Request,
     auth_context: AuthContext = Depends(get_auth_context),  # noqa: B008 - FastAPI dependency declaration
 ) -> dict[str, Any]:
-    # Auth middleware supplies this object; JSON fields/headers never confer access.
-    scope = getattr(request.state, "retrieval_scope", None)
-    if scope is not None and not isinstance(scope, RetrievalScope):
-        raise HTTPException(status_code=403, detail="Invalid server retrieval scope")
-    if scope and (
-        scope.user_id != auth_context.user_id
-        or scope.project_id not in auth_context.authorized_project_ids
-    ):
-        raise HTTPException(status_code=403, detail="Retrieval scope does not match authenticated access")
-    if scope and payload.project_id and payload.project_id != scope.project_id:
-        raise HTTPException(status_code=403, detail="Project does not match the authorized scope")
+    service = RequestContextService(
+        getattr(request.app.state, "knowledge_repository", None),
+        timeout_seconds=get_config().retrieval_timeout_seconds,
+    )
+    try:
+        context = await service.build(
+            auth_context,
+            project_id=payload.project_id,
+            injected_scope=getattr(request.state, "retrieval_scope", None),
+        )
+    except ContextAccessDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except ContextUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    scope = context.retrieval_scope
     user_id = auth_context.user_id
     project_id = scope.project_id if scope else (payload.project_id or "")
-    if project_id and project_id not in auth_context.authorized_project_ids:
-        raise HTTPException(status_code=403, detail="Project access denied")
     graph = request.app.state.graph
     thread_id = hashlib.sha256(
         json.dumps([user_id, project_id, payload.session_id], ensure_ascii=False).encode("utf-8")
@@ -65,7 +71,7 @@ async def chat(
             "status": "running",
         },
         config={"configurable": {"thread_id": thread_id}},
-        context=RequestContext(retrieval_scope=scope),
+        context=context,
     )
 
     return {

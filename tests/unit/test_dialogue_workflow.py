@@ -4,7 +4,12 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from testmind.models.retrieval import GroundedAnswer, KnowledgeChunk, RetrievalScope
+from testmind.models.retrieval import (
+    ActiveVersionScope,
+    GroundedAnswer,
+    KnowledgeChunk,
+    RetrievalScope,
+)
 from testmind.orchestration.context import RequestContext
 from testmind.workflows.dialogue import create_dialogue_graph
 
@@ -207,3 +212,55 @@ async def test_model_can_explicitly_abstain_without_publishing_an_unsupported_an
     )
     assert result["status"] == "insufficient_evidence" and result["citations"] == []
     assert result["answer"] != "Unverified"
+
+
+@pytest.mark.asyncio
+async def test_active_document_and_index_versions_enable_grounded_answer():
+    retriever, model = FakeRetriever([chunk(knowledge_base_id="kb1", index_version="i3")]), FakeModel()
+    ctx = context(
+        document_versions={},
+        knowledge_base_ids=frozenset({"kb1"}),
+        active_versions={"d1": ActiveVersionScope(document_version="v2", index_version="i3")},
+    )
+    result = await create_dialogue_graph(retriever, llm=model).ainvoke(state(), context=ctx)
+    assert result["status"] == "completed"
+    assert result["citations"][0]["index_version"] == "i3"
+    assert len(retriever.calls) == 1 and len(model.structured_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"knowledge_base_id": "other"},
+        {"index_version": "old"},
+        {"index_version": ""},
+        {"document_version": "old"},
+        {"document_id": "d2"},
+    ],
+)
+async def test_active_scope_rejects_foreign_or_stale_chunks_even_with_legacy_map(changes):
+    model = FakeModel()
+    ctx = context(
+        document_versions={"d1": "v2", "d2": "v2"},
+        knowledge_base_ids=frozenset({"kb1"}),
+        active_versions={"d1": ActiveVersionScope(document_version="v2", index_version="i3")},
+    )
+    evidence = chunk(**({"knowledge_base_id": "kb1", "index_version": "i3"} | changes))
+    result = await create_dialogue_graph(FakeRetriever([evidence]), llm=model).ainvoke(
+        state(), context=ctx
+    )
+    assert result["status"] == "insufficient_evidence"
+    assert result["citations"] == []
+    assert not model.structured_calls
+
+
+@pytest.mark.asyncio
+async def test_authorized_base_without_active_versions_returns_empty_without_search():
+    retriever, model = FakeRetriever([chunk()]), FakeModel()
+    ctx = context(document_versions={}, knowledge_base_ids=frozenset({"kb1"}))
+    result = await create_dialogue_graph(retriever, llm=model).ainvoke(state(), context=ctx)
+    assert result["status"] == "insufficient_evidence"
+    assert result["citations"] == []
+    assert retriever.calls == []
+    assert not model.structured_calls

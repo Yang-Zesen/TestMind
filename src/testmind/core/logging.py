@@ -3,7 +3,9 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -19,6 +21,31 @@ _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _INITIALIZED = False
+
+
+class DecisionAuditFormatter(logging.Formatter):
+    """Render approved decision events as JSON while preserving other log lines."""
+
+    _FIELDS = frozenset(
+        {
+            "event", "trace_id", "task_id", "attempt_id", "node", "project_id",
+            "intent", "answer_mode", "outcome", "stop_reason", "error_code",
+            "policy_decision", "tool_name", "model_version", "prompt_version",
+            "schema_version", "duration_ms", "retry_count", "result_count",
+        }
+    )
+
+    def format(self, record: logging.LogRecord) -> str:
+        decision = getattr(record, "decision_event", None)
+        if not isinstance(decision, dict):
+            return super().format(record)
+        payload = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+        }
+        payload.update({key: value for key, value in decision.items() if key in self._FIELDS})
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 def setup_logging(level: int = logging.DEBUG) -> None:
     """
@@ -46,9 +73,7 @@ def setup_logging(level: int = logging.DEBUG) -> None:
         show_path=False,
     )
     console_handler.setLevel(level)
-    console_handler.setFormatter(
-        logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
-    )
+    console_handler.setFormatter(DecisionAuditFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
 
     # ---- 文件 Handler（轮转，单文件 5MB，保留 3 份）----
     file_handler = RotatingFileHandler(
@@ -58,15 +83,15 @@ def setup_logging(level: int = logging.DEBUG) -> None:
         encoding="utf-8",
     )
     file_handler.setLevel(level)
-    file_handler.setFormatter(
-        logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
-    )
+    file_handler.setFormatter(DecisionAuditFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
 
     root.addHandler(console_handler)
     root.addHandler(file_handler)
 
     # asyncio 的 selector 调试信息对应用日志没有帮助，避免启动时刷屏。
     logging.getLogger("asyncio").setLevel(logging.WARNING)
+    for dependency in ("httpx", "httpcore", "langchain", "langgraph", "mcp", "dotenv"):
+        logging.getLogger(dependency).setLevel(logging.WARNING)
 
     _INITIALIZED = True
 

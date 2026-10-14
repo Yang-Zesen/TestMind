@@ -1,12 +1,15 @@
 """FastAPI application entrypoint."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from testmind.api.router import api_router
+from testmind.core.authentication import DemoAuthorizationProvider
 from testmind.core.config import get_config
+from testmind.core.runtime_limits import RuntimeLimitsMiddleware
 from testmind.core.security import (
     AuthContext,
     MockAuthorizationProvider,
@@ -22,6 +25,8 @@ from testmind.infrastructure.milvus.retrieval import MilvusRetrievalService
 from testmind.infrastructure.postgres.graph_sync_repository import GraphSyncRepository
 from testmind.infrastructure.postgres.knowledge_repository import KnowledgeRepository
 from testmind.infrastructure.postgres.postgresql_client import open_postgresql_client
+from testmind.infrastructure.postgres.task_repository import TaskRepository
+from testmind.infrastructure.zentao.mcp import ZenTaoMCPClient, ZenTaoService, ZenTaoSettings
 from testmind.orchestration.builder import create_main_graph
 
 
@@ -31,12 +36,13 @@ def selector_loop_factory(**_: object) -> asyncio.AbstractEventLoop:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    jev_client = JevClient.from_config()
-    retrieval = MilvusRetrievalService(get_config())
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config = get_config()
+    jev_client = None if config.demo_mode else JevClient.from_config()
+    retrieval = MilvusRetrievalService(get_config())
     graph_settings = GraphSettings.from_env()
     graph_driver = None
+    zentao_client = None
     if not getattr(app.state, "authorization_provider", None):
         if config.knowledge_auth_mode == "mock":
             app.state.authorization_provider = MockAuthorizationProvider(
@@ -59,9 +65,16 @@ async def lifespan(app: FastAPI):
         else:
             app.state.authorization_provider = None
     try:
+        zentao_settings = ZenTaoSettings.from_env()
+        if zentao_settings.enabled:
+            zentao_client = ZenTaoMCPClient(zentao_settings)
+        app.state.zentao_service = ZenTaoService(zentao_client) if zentao_client else None
         async with open_postgresql_client() as postgres:
             app.state.postgresql = postgres
             app.state.knowledge_repository = KnowledgeRepository(postgres.pool)
+            app.state.task_repository = TaskRepository(postgres.pool)
+            if config.knowledge_auth_mode == "demo":
+                app.state.authorization_provider = DemoAuthorizationProvider(app.state.task_repository)
             app.state.graph_sync_repository = GraphSyncRepository(postgres.pool)
             app.state.graph_query_service = None
             app.state.graph_event_source = None
@@ -92,22 +105,31 @@ async def lifespan(app: FastAPI):
                 )
             app.state.jev_client = jev_client
             app.state.retrieval = retrieval
-            app.state.graph = create_main_graph(
-                checkpointer=postgres.checkpointer,
-                jev_client=jev_client,
-                retriever=retrieval,
-            )
+            if config.demo_mode:
+                from testmind.demo.runtime import create_demo_graph
+                app.state.graph = create_demo_graph(postgres.checkpointer, app.state.task_repository)
+            else:
+                app.state.graph = create_main_graph(
+                    checkpointer=postgres.checkpointer,
+                    jev_client=jev_client,
+                    retriever=retrieval,
+                )
             yield
     finally:
+        app.state.zentao_service = None
+        if zentao_client is not None:
+            await zentao_client.aclose()
         if graph_driver is not None:
             await graph_driver.close()
         try:
             await retrieval.aclose()
         finally:
-            await jev_client.aclose()
+            if jev_client is not None:
+                await jev_client.aclose()
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(RuntimeLimitsMiddleware)
 app.include_router(api_router)
 
 if __name__ == "__main__":

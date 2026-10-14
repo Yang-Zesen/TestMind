@@ -7,7 +7,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool, text
 
 config = context.config
-if config.config_file_name is not None:
+if config.config_file_name is not None and config.file_config.has_section("loggers"):
     fileConfig(config.config_file_name)
 
 target_metadata = None
@@ -29,6 +29,10 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     section = config.get_section(config.config_ini_section) or {}
     section["sqlalchemy.url"] = os.getenv("POSTGRES_DSN", section["sqlalchemy.url"])
+    if section["sqlalchemy.url"].startswith("postgresql://"):
+        section["sqlalchemy.url"] = section["sqlalchemy.url"].replace(
+            "postgresql://", "postgresql+psycopg://", 1
+        )
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
     with connectable.connect() as connection:
         connection.execute(text("CREATE SCHEMA IF NOT EXISTS knowledge"))

@@ -15,6 +15,17 @@ def test_app_port_is_read_from_environment(monkeypatch):
     assert config.app_port == 9090
 
 
+def test_ai_node_timeout_is_configurable(monkeypatch):
+    monkeypatch.setenv("AI_NODE_TIMEOUT_SECONDS", "2.5")
+    config = get_config.__globals__["Config"].from_env()
+    assert config.ai_node_timeout_seconds == 2.5
+
+
+def test_ai_node_timeout_rejects_non_finite_values():
+    with pytest.raises(ValueError):
+        get_config.__globals__["Config"](ai_node_timeout_seconds=float("inf"))
+
+
 def test_model_defaults_are_project_local_even_before_weights_exist(monkeypatch, tmp_path):
     from testmind.core import config as module
 

@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field, model_validator
 
 _ROOT_DIR = Path(__file__).resolve().parents[3]
 
-load_dotenv(_ROOT_DIR / ".env")
+if os.getenv("TESTMIND_DEMO_MODE", "false").lower() != "true":
+    load_dotenv(_ROOT_DIR / ".env")
 
 
 def _local_model_path(variable: str, name: str) -> str:
@@ -27,6 +28,7 @@ class Config(BaseModel):
     app_host: str = Field(default_factory=lambda: os.getenv("APP_HOST", "127.0.0.1"), description="FastAPI 监听地址")
     app_port: int = Field(default_factory=lambda: int(os.getenv("APP_PORT", "26104")), ge=1, le=65535, description="FastAPI 监听端口")
     app_env: str = Field(default_factory=lambda: os.getenv("APP_ENV", "development"))
+    demo_mode: bool = Field(default_factory=lambda: os.getenv("TESTMIND_DEMO_MODE", "false").lower() == "true")
     knowledge_auth_mode: str = Field(default_factory=lambda: os.getenv("KNOWLEDGE_AUTH_MODE", "disabled"))
     knowledge_mock_user_id: str = Field(default_factory=lambda: os.getenv("KNOWLEDGE_MOCK_USER_ID", "dev-user"))
     knowledge_mock_project_ids: str = Field(default_factory=lambda: os.getenv("KNOWLEDGE_MOCK_PROJECT_IDS", ""))
@@ -61,12 +63,12 @@ class Config(BaseModel):
 
 
     # LLM 相关配置
-    api_key: str = Field(default=os.getenv("DEEPSEEK_API_KEY", ""), description="Deepseek API Key")
+    api_key: str = Field(default=os.getenv("DEEPSEEK_API_KEY", ""), repr=False, description="Deepseek API Key")
     model: str = Field(default=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"), description="Deepseek 模型名称")
     base_url: str = Field(default=os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.cn/v1"), description="Deepseek API Base URL")
 
     # PostgreSql 相关配置
-    postgres_dsn: str = Field(default=os.getenv("POSTGRES_DSN", ""), repr=False, description="PostgreSQL DSN")
+    postgres_dsn: str = Field(default_factory=lambda: os.getenv("POSTGRES_DSN", ""), repr=False, description="PostgreSQL DSN")
 
     # JEV 相关配置
     jev_api_key: str = Field(default=os.getenv("JEV_API_KEY", ""), repr=False, description="JEV API Key")
@@ -97,12 +99,17 @@ class Config(BaseModel):
     dialogue_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("DIALOGUE_TIMEOUT_SECONDS", "60")), gt=0
     )
+    ai_node_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("AI_NODE_TIMEOUT_SECONDS", "60")),
+        gt=0,
+        allow_inf_nan=False,
+    )
 
     @model_validator(mode="after")
     def validate_knowledge_auth(self) -> Config:
-        if self.knowledge_auth_mode not in {"disabled", "request_state", "mock"}:
-            raise ValueError("KNOWLEDGE_AUTH_MODE must be disabled, request_state, or mock")
-        if self.knowledge_auth_mode == "mock" and self.app_env.lower() != "development":
+        if self.knowledge_auth_mode not in {"disabled", "request_state", "mock", "demo"}:
+            raise ValueError("KNOWLEDGE_AUTH_MODE must be disabled, request_state, mock, or demo")
+        if (self.demo_mode or self.knowledge_auth_mode in {"mock", "demo"}) and self.app_env.lower() != "development":
             raise ValueError("Mock knowledge authorization is allowed only when APP_ENV=development")
         if self.knowledge_storage_mode not in {"filesystem", "minio"}:
             raise ValueError("KNOWLEDGE_STORAGE_MODE must be filesystem or minio")

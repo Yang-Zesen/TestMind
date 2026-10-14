@@ -1,0 +1,14 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run pytest tests/unit -q
+      - run: uv run ruff check src/testmind/core/authentication.py src/testmind/core/decision_audit.py src/testmind/core/model_recovery.py src/testmind/core/runtime_limits.py src/testmind/models/task.py src/testmind/models/approval.py src/testmind/api/tasks.py src/testmind/api/approvals.py src/testmind/api/health.py src/testmind/infrastructure/postgres/task_repository.py src/testmind/worker/task_worker.py src/testmind/demo src/testmind/services tests/integration/test_task_recovery.py
+      - run: uv run mypy --follow-imports=silent src/testmind/core/authentication.py src/testmind/core/model_recovery.py src/testmind/core/runtime_limits.py src/testmind/models/task.py src/testmind/models/approval.py src/testmind/infrastructure/postgres/task_repository.py src/testmind/api/tasks.py src/testmind/api/approvals.py src/testmind/api/health.py src/testmind/worker/task_worker.py src/testmind/demo/runtime.py src/testmind/services/readonly_tools.py src/testmind/workflows/dialogue.py src/testmind/agents/general_chat.py src/testmind/orchestration/builder.py

@@ -7,13 +7,14 @@ class FakeMilvus:
         self.upsert_calls = []
         self.query_calls = []
 
-    def upsert(self, *, collection_name, data):
+    def upsert(self, *, collection_name, data, timeout):
+        assert timeout == 3
         self.upsert_calls.append(data)
         for row in data:
             self.rows[row["chunk_id"]] = dict(row)
 
-    def flush(self, *, collection_name):
-        return None
+    def flush(self, *, collection_name, timeout):
+        assert timeout == 3
 
     def query(self, *, collection_name, filter, output_fields, consistency_level, timeout=None):
         self.query_calls.append(consistency_level)

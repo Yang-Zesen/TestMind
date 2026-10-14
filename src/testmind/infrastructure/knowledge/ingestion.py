@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
 from testmind.infrastructure.knowledge.chunking import KnowledgeChunkInput, split_document
-from testmind.infrastructure.knowledge.document_parser import parse_document
+from testmind.infrastructure.knowledge.document_parser import parse_document_bounded
 from testmind.infrastructure.knowledge.milvus_index import MilvusKnowledgeIndex
 from testmind.infrastructure.knowledge.quality import evaluate_quality
 from testmind.infrastructure.knowledge.source_storage import SourceStorage
@@ -40,10 +41,18 @@ class KnowledgeIngestionHandler:
     async def __call__(self, job: Mapping[str, Any]) -> None:
         inputs = await self._repository.get_version_processing_inputs(str(job["version_id"]))
         if inputs is None:
+            # A deleted document intentionally becomes invisible to processing queries.
+            async with self._repository._pool.connection() as connection:
+                cursor = await connection.execute("SELECT d.tombstoned_at FROM knowledge.document_versions v JOIN knowledge.documents d ON d.id=v.document_id WHERE v.id=%s", (str(job["version_id"]),))
+                deleted = await cursor.fetchone()
+            if deleted and deleted["tombstoned_at"] is not None:
+                return
             raise PermanentJobError("document_version_missing")
+        if inputs.get("status") in {"ready", "active", "archived", "rejected"}:
+            return
         try:
             with self._storage.open(inputs["storage_key"]) as source:
-                content = source.read()
+                content = source.read(25 * 1024 * 1024 + 1)
             suffix = Path(inputs["storage_key"]).suffix.lower()
             media_type = {
                 ".pdf": "application/pdf",
@@ -53,8 +62,8 @@ class KnowledgeIngestionHandler:
             }.get(suffix)
             if media_type is None:
                 raise ValueError("unsupported source type")
-            parsed = parse_document(content, media_type, filename=f"source{suffix}")
-        except (OSError, ValueError):
+            parsed = await parse_document_bounded(content, media_type, filename=f"source{suffix}")
+        except (OSError, ValueError, TimeoutError):
             raise PermanentJobError("source_parse_failed") from None
 
         chunks = split_document(parsed, version_id=inputs["version_id"])
@@ -68,15 +77,15 @@ class KnowledgeIngestionHandler:
             return
 
         try:
-            embeddings = self._embedder.encode_documents([chunk.content for chunk in chunks])
+            embeddings = await asyncio.to_thread(self._embedder.encode_documents, [chunk.content for chunk in chunks])
             dense = embeddings["dense"]
             sparse = embeddings["sparse"]
             records = [
                 self._record(inputs, chunk, _vector_at(dense, index), _sparse_at(sparse, index))
                 for index, chunk in enumerate(chunks)
             ]
-            verified_count = self._index.upsert_inactive(records)
-        except Exception:
+            verified_count = await asyncio.to_thread(self._index.upsert_inactive, records)
+        except Exception:  # noqa: BLE001 - classify provider/index failures without content.
             raise RetryableJobError("embedding_or_milvus_write_failed") from None
 
         accepted = verified_count == len(chunks)

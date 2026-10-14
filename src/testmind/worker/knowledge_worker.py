@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+import signal
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
-import signal
 from typing import Any
 from uuid import uuid4
 
@@ -86,11 +87,22 @@ class KnowledgeWorker:
         }
         logger.info("knowledge_job_claimed", extra=fields)
         heartbeat_task = asyncio.create_task(self._heartbeat(job_id, fields))
+        handler_task: asyncio.Future[None] | None = None
         try:
             handler = self._handlers.get(str(job.get("operation", "")))
             if handler is None:
                 raise PermanentJobError("unsupported_operation")
-            await handler(job)
+            handler_task = asyncio.ensure_future(handler(job))
+            finished, _ = await asyncio.wait(
+                {handler_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if heartbeat_task in finished:
+                # A failed renewal leaves ownership uncertain; let the lease expire.
+                with suppress(Exception):
+                    await heartbeat_task
+                logger.error("knowledge_job_stopped_without_lease", extra=fields)
+                return True
+            await handler_task
             completed = await self._repository.complete_job(
                 job_id=job_id, worker_id=self._worker_id
             )
@@ -112,7 +124,7 @@ class KnowledgeWorker:
         except asyncio.CancelledError:
             logger.warning("knowledge_job_interrupted_lease_will_expire", extra=fields)
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - durable retry for sanitized handler failures.
             await self._repository.schedule_retry(
                 job_id=job_id, worker_id=self._worker_id, error_code="unexpected_worker_error"
             )
@@ -122,11 +134,13 @@ class KnowledgeWorker:
                 extra={**fields, "error_code": "unexpected_worker_error"},
             )
         finally:
+            if handler_task is not None:
+                handler_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await handler_task
             heartbeat_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
-            except asyncio.CancelledError:
-                pass
         return True
 
     async def _heartbeat(self, job_id: str, fields: dict[str, str]) -> None:
@@ -141,7 +155,6 @@ class KnowledgeWorker:
 
 
 async def _run_configured_worker() -> None:
-    from langchain_core.runnables.config import ensure_config
     from psycopg.rows import dict_row
     from psycopg_pool import AsyncConnectionPool
 
@@ -151,15 +164,17 @@ async def _run_configured_worker() -> None:
     from testmind.infrastructure.knowledge.milvus_index import MilvusKnowledgeIndex
     from testmind.infrastructure.knowledge.source_storage import create_source_storage
 
-    del ensure_config
     config = get_config()
     if not config.postgres_dsn:
         raise RuntimeError("POSTGRES_DSN is required for the knowledge worker")
     if not Path(config.embedding_model).is_dir():
         raise RuntimeError("BGE_M3_PATH must reference an installed local model; downloads are disabled")
 
-    from pymilvus import MilvusClient
-    from pymilvus.model.hybrid import BGEM3EmbeddingFunction
+    torch = importlib.import_module("torch")
+    MilvusClient = importlib.import_module("pymilvus").MilvusClient
+    BGEM3EmbeddingFunction = importlib.import_module("pymilvus.model.hybrid").BGEM3EmbeddingFunction
+
+    torch.set_num_threads(4)
 
     embedder = BGEM3EmbeddingFunction(
         model_name=config.embedding_model,
@@ -191,13 +206,19 @@ async def _run_configured_worker() -> None:
             repository, storage, embedder, index, model_version=model_version
         )
         activation = KnowledgeActivationService(repository, index)
+        from testmind.infrastructure.knowledge.demo_source import (
+            DemoSourcePoller,
+            SourceSyncHandler,
+        )
+        from testmind.infrastructure.postgres.case_repository import CaseRepository
+        poller = DemoSourcePoller(CaseRepository(pool), repository) if config.demo_mode else None
 
         async def activate(job: Mapping[str, Any]) -> None:
             await activation.activate(str(job["correlation_id"]))
 
         worker = KnowledgeWorker(
             repository,
-            handlers={"ingest": ingestion, "reindex": ingestion, "activate": activate},
+            handlers={"ingest": ingestion, "reindex": ingestion, "activate": activate, "source_sync": SourceSyncHandler(repository, storage, ingestion)},
             lease_seconds=60,
             heartbeat_seconds=15,
         )
@@ -205,7 +226,13 @@ async def _run_configured_worker() -> None:
         previous_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(worker.stop))
         try:
-            await worker.run()
+            if poller is None:
+                await worker.run()
+            else:
+                while not worker._stopping.is_set():
+                    await poller.poll()
+                    if not await worker.run_once():
+                        await asyncio.sleep(2)
         finally:
             signal.signal(signal.SIGINT, previous_handler)
             with suppress(Exception):

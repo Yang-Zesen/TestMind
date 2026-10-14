@@ -118,6 +118,7 @@ class BaseNode(ABC):
         stop_reasons = {
             "completed": "completed",
             "needs_input": "needs_input",
+            "waiting_review": "waiting_review",
             "insufficient_evidence": "no_usable_evidence",
             "failed": "failed",
         }

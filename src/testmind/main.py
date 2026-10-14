@@ -22,12 +22,16 @@ from testmind.infrastructure.jev.jev_client import JevClient
 from testmind.infrastructure.knowledge.source_events import ZenTaoEventAdapter
 from testmind.infrastructure.knowledge.source_storage import create_source_storage
 from testmind.infrastructure.milvus.retrieval import MilvusRetrievalService
+from testmind.infrastructure.postgres.case_repository import CaseRepository
 from testmind.infrastructure.postgres.graph_sync_repository import GraphSyncRepository
 from testmind.infrastructure.postgres.knowledge_repository import KnowledgeRepository
 from testmind.infrastructure.postgres.postgresql_client import open_postgresql_client
 from testmind.infrastructure.postgres.task_repository import TaskRepository
 from testmind.infrastructure.zentao.mcp import ZenTaoMCPClient, ZenTaoService, ZenTaoSettings
 from testmind.orchestration.builder import create_main_graph
+from testmind.services.case_publication import CasePublicationService, DemoCaseWriter
+from testmind.services.retrieval_scope import RetrievalScopeLoader
+from testmind.workflows.retrieval import SharedRetrievalService
 
 
 def selector_loop_factory(**_: object) -> asyncio.AbstractEventLoop:
@@ -73,6 +77,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.postgresql = postgres
             app.state.knowledge_repository = KnowledgeRepository(postgres.pool)
             app.state.task_repository = TaskRepository(postgres.pool)
+            app.state.case_repository = CaseRepository(postgres.pool)
+            app.state.case_publication = CasePublicationService(app.state.case_repository, DemoCaseWriter(app.state.case_repository)) if config.demo_mode else None
+            shared_retrieval = SharedRetrievalService(retrieval, refresh_scope=RetrievalScopeLoader(app.state.task_repository, app.state.knowledge_repository))
             if config.knowledge_auth_mode == "demo":
                 app.state.authorization_provider = DemoAuthorizationProvider(app.state.task_repository)
             app.state.graph_sync_repository = GraphSyncRepository(postgres.pool)
@@ -107,12 +114,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.retrieval = retrieval
             if config.demo_mode:
                 from testmind.demo.runtime import create_demo_graph
-                app.state.graph = create_demo_graph(postgres.checkpointer, app.state.task_repository)
+                app.state.graph = create_demo_graph(postgres.checkpointer, app.state.task_repository, shared_retrieval)
             else:
                 app.state.graph = create_main_graph(
                     checkpointer=postgres.checkpointer,
                     jev_client=jev_client,
-                    retriever=retrieval,
+                    retriever=shared_retrieval,
                 )
             yield
     finally:

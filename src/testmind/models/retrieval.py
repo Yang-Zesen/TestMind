@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -47,3 +49,15 @@ class GroundedAnswer(BaseModel):
     cited_chunk_ids: list[str] = Field(default_factory=list)
     insufficient_evidence: bool = False
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class EvidenceBundle(BaseModel):
+    """Evidence only, with identity and caller isolation outside model control."""
+
+    model_config = ConfigDict(extra="forbid")
+    caller_id: str = Field(min_length=1, max_length=200)
+    user_id: str
+    project_id: str
+    status: Literal["retrieved", "insufficient_evidence"]
+    chunks: list[KnowledgeChunk] = Field(default_factory=list, max_length=20)
+    schema_version: str = "evidence-v1"

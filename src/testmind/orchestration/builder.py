@@ -26,6 +26,7 @@ def create_main_graph(
     llm: Any | None = None,
     node_overrides: dict[str, Any] | None = None,
     readonly_node: Any | None = None,
+    case_design_node: Any | None = None,
 ) -> CompiledStateGraph[GraphState, RequestContext, GraphState, GraphState]:
     """Compile the input normalization, intent routing and answer workflow."""
     workflow = StateGraph(GraphState, context_schema=RequestContext)
@@ -42,6 +43,9 @@ def create_main_graph(
     for node_name, node in nodes.items():
         workflow.add_node(node_name, node)
     workflow.add_node("dialogue", create_dialogue_graph(retriever, llm=llm))
+    if case_design_node is not None:
+        workflow.add_node("case_design", case_design_node)
+        workflow.add_edge("case_design", END)
     if readonly_node is not None:
         workflow.add_node("readonly_tools", readonly_node)
         workflow.add_edge("readonly_tools", END)
@@ -50,11 +54,12 @@ def create_main_graph(
     workflow.add_edge("spell_correction", "intent_recognition")
     workflow.add_conditional_edges(
         "intent_recognition",
-        lambda state: "readonly_tools" if readonly_node is not None and state.get("intent") == "readonly_query" else route_by_intent(state),
+        lambda state: "case_design" if case_design_node is not None and state.get("intent") == "test_case_generation" else "readonly_tools" if readonly_node is not None and state.get("intent") == "readonly_query" else route_by_intent(state),
         {
             "coreference_resolution": "coreference_resolution",
             "clarify": "clarify",
             **({"readonly_tools": "readonly_tools"} if readonly_node is not None else {}),
+            **({"case_design": "case_design"} if case_design_node is not None else {}),
         },
     )
     workflow.add_edge("coreference_resolution", "dialogue")

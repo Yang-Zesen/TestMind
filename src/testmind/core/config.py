@@ -80,6 +80,7 @@ class Config(BaseModel):
     milvus_token: str = Field(default_factory=lambda: os.getenv("MILVUS_TOKEN", ""), repr=False)
     milvus_collection: str = Field(default_factory=lambda: os.getenv("MILVUS_COLLECTION", "testmind_chunks"))
     milvus_dense_field: str = Field(default_factory=lambda: os.getenv("MILVUS_DENSE_FIELD", "dense_vector"))
+    milvus_dense_metric: str = Field(default_factory=lambda: os.getenv("MILVUS_DENSE_METRIC", "IP"))
     milvus_sparse_field: str = Field(default_factory=lambda: os.getenv("MILVUS_SPARSE_FIELD", "sparse_vector"))
     milvus_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("MILVUS_TIMEOUT_SECONDS", "5")), gt=0

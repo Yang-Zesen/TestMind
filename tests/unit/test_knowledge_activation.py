@@ -41,6 +41,17 @@ class FakeIndex:
         return 2
 
 
+async def test_already_completed_activation_is_a_safe_worker_replay():
+    repository = FakeRepository()
+    original = repository.get_activation_operation
+    async def completed(operation_id):
+        return {**await original(operation_id), "status":"succeeded"}
+    repository.get_activation_operation = completed
+    index = FakeIndex(repository)
+    await KnowledgeActivationService(repository, index).activate("already-completed")
+    assert index.calls == []
+
+
 @pytest.mark.asyncio
 async def test_activation_sets_target_before_pointer_then_deactivates_old():
     repository = FakeRepository()

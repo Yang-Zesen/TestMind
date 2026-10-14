@@ -38,8 +38,8 @@ class MilvusKnowledgeIndex:
         if not records:
             return 0
         inactive = [{**record, "is_active": False} for record in records]
-        self._client.upsert(collection_name=self._collection_name, data=inactive)
-        self._client.flush(collection_name=self._collection_name)
+        self._client.upsert(collection_name=self._collection_name, data=inactive, timeout=self._timeout_seconds)
+        self._client.flush(collection_name=self._collection_name, timeout=self._timeout_seconds)
         ids = [record["chunk_id"] for record in inactive]
         found = self._client.query(
             collection_name=self._collection_name,
@@ -73,8 +73,8 @@ class MilvusKnowledgeIndex:
         if not rows:
             return 0
         replacements = [{**row, "is_active": active} for row in rows]
-        self._client.upsert(collection_name=self._collection_name, data=replacements)
-        self._client.flush(collection_name=self._collection_name)
+        self._client.upsert(collection_name=self._collection_name, data=replacements, timeout=self._timeout_seconds)
+        self._client.flush(collection_name=self._collection_name, timeout=self._timeout_seconds)
         expected_ids = {row["chunk_id"] for row in rows}
         verified = self._client.query(
             collection_name=self._collection_name,

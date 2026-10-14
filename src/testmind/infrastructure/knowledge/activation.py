@@ -22,6 +22,8 @@ class KnowledgeActivationService:
         operation = await self._repository.get_activation_operation(operation_id)
         if operation is None:
             raise ActivationNotReady("activation_operation_missing")
+        if operation["status"] == "succeeded":
+            return
         target_count = _count(operation.get("target_chunk_count"))
         changed = await asyncio.to_thread(
             self._index.set_version_active,

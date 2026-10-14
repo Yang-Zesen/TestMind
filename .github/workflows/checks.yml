@@ -10,5 +10,19 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --group dev
       - run: uv run pytest tests/unit -q
+      - name: P2/P3 contracts
+        run: >-
+          uv run ruff check
+          src/testmind/models/test_case.py src/testmind/models/retrieval.py
+          src/testmind/workflows/retrieval.py src/testmind/workflows/test_case_generation.py
+          src/testmind/api/test_cases.py src/testmind/api/knowledge.py
+          src/testmind/infrastructure/postgres/case_repository.py
+          src/testmind/infrastructure/knowledge/activation.py
+          src/testmind/infrastructure/knowledge/document_parser.py
+          src/testmind/infrastructure/knowledge/demo_source.py
+          src/testmind/infrastructure/knowledge/ingestion.py
+          src/testmind/infrastructure/knowledge/milvus_index.py
+          src/testmind/worker/knowledge_worker.py
+          src/testmind/infrastructure/milvus/retrieval.py scripts/verify_p2_p3.py
       - run: uv run ruff check src/testmind/core/authentication.py src/testmind/core/decision_audit.py src/testmind/core/model_recovery.py src/testmind/core/runtime_limits.py src/testmind/models/task.py src/testmind/models/approval.py src/testmind/api/tasks.py src/testmind/api/approvals.py src/testmind/api/health.py src/testmind/infrastructure/postgres/task_repository.py src/testmind/worker/task_worker.py src/testmind/demo src/testmind/services tests/integration/test_task_recovery.py
       - run: uv run mypy --follow-imports=silent src/testmind/core/authentication.py src/testmind/core/model_recovery.py src/testmind/core/runtime_limits.py src/testmind/models/task.py src/testmind/models/approval.py src/testmind/infrastructure/postgres/task_repository.py src/testmind/api/tasks.py src/testmind/api/approvals.py src/testmind/api/health.py src/testmind/worker/task_worker.py src/testmind/demo/runtime.py src/testmind/services/readonly_tools.py src/testmind/workflows/dialogue.py src/testmind/agents/general_chat.py src/testmind/orchestration/builder.py

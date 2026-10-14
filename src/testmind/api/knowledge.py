@@ -2,33 +2,101 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import importlib
 import json
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
+from testmind.api.tasks import Authorized
 from testmind.core.config import get_config
 from testmind.core.security import (
     AuthContext,
-    get_auth_context,
     get_authorized_project_ids,
     require_knowledge_base_access,
     require_project_access,
 )
 from testmind.infrastructure.knowledge.document_parser import validate_upload
 from testmind.infrastructure.knowledge.source_storage import SourceStorage
+from testmind.infrastructure.milvus.retrieval import MilvusRetrievalService
 from testmind.infrastructure.postgres.knowledge_repository import (
     IdempotencyConflict,
     InvalidVersionTransition,
     KnowledgeRepository,
 )
+from testmind.infrastructure.postgres.task_repository import TaskRepository
+from testmind.services.request_context import RequestContextService
+from testmind.services.retrieval_scope import RetrievalScopeLoader
 
 router = APIRouter(prefix="/api/v1", tags=["knowledge"])
+
+
+@router.get("/knowledge-chunks/{chunk_id}")
+async def cited_chunk(chunk_id: str, project_id: str, request: Request, context: Authorized) -> dict[str, Any]:
+    require_project_access(context, project_id)
+    if len(chunk_id) > 200:
+        raise HTTPException(422, "invalid_chunk_id")
+    scope = (await RequestContextService(_repository(request)).build(context, project_id=project_id)).retrieval_scope
+    if scope is None or not scope.active_versions:
+        raise HTTPException(404, "chunk_not_found")
+    def read() -> list[dict[str, Any]]:
+        MilvusClient = importlib.import_module("pymilvus").MilvusClient
+        config = get_config()
+        client = MilvusClient(uri=config.milvus_uri, token=config.milvus_token)
+        try:
+            return cast(list[dict[str, Any]], client.query(collection_name=config.milvus_collection, filter=f"({MilvusRetrievalService.build_filter(scope)}) and chunk_id == {json.dumps(chunk_id)}", output_fields=["chunk_id","document_id","document_version","index_version","knowledge_base_id","project_id","title","content","source_locator"], consistency_level="Strong", timeout=5))
+        finally:
+            client.close()
+    try:
+        async with asyncio.timeout(8):
+            rows = await asyncio.to_thread(read)
+            fresh = await RetrievalScopeLoader(TaskRepository(request.app.state.postgresql.pool), _repository(request))(scope) if get_config().demo_mode else scope
+    except PermissionError:
+        raise HTTPException(403, "chunk_access_revoked") from None
+    except Exception:  # noqa: BLE001 - citation dependency errors never expose credentials.
+        raise HTTPException(503, "chunk_service_unavailable") from None
+    if not rows:
+        raise HTTPException(404, "chunk_not_found")
+    row = rows[0]
+    current = fresh.active_versions.get(row["document_id"])
+    if current is None or current.document_version != row["document_version"] or current.index_version != row["index_version"]:
+        raise HTTPException(409, "chunk_version_expired")
+    return row
+
+
+@router.get("/versions/{version_id}/index-report")
+async def index_report(version_id: str, request: Request, context: Authorized) -> dict[str, Any]:
+    scope = await _repository(request).get_version_scope(version_id)
+    if scope is None:
+        raise HTTPException(404, "version_not_found")
+    require_knowledge_base_access(context, scope["kb_id"])
+    require_project_access(context, scope["project_id"])
+    async with request.app.state.postgresql.pool.connection() as connection:
+        cursor = await connection.execute("SELECT index_report FROM knowledge.document_versions WHERE id=%s", (version_id,))
+        row = await cursor.fetchone()
+    return dict(row["index_report"] or {})
+
+
+@router.get("/documents/{document_id}/maintenance-preview")
+async def maintenance_preview(document_id: str, request: Request, context: Authorized) -> dict[str, Any]:
+    scope = await _authorized_document(request, context, document_id)
+    versions = await _repository(request).list_versions(document_id=document_id)
+    return {"document_id":document_id, "project_id":scope["project_id"], "dry_run":True, "version_count":len(versions), "operations":["reindex","logical_delete"], "physical_deletion":False}
 
 
 class AcceptedUpload(BaseModel):
@@ -55,14 +123,14 @@ def _repository(request: Request) -> KnowledgeRepository:
     repository = getattr(request.app.state, "knowledge_repository", None)
     if repository is None:
         raise HTTPException(status_code=503, detail="Knowledge service is unavailable")
-    return repository
+    return cast(KnowledgeRepository, repository)
 
 
 def _storage(request: Request) -> SourceStorage:
     storage = getattr(request.app.state, "source_storage", None)
     if storage is None:
         raise HTTPException(status_code=503, detail="Knowledge storage is unavailable")
-    return storage
+    return cast(SourceStorage, storage)
 
 
 async def _authorized_base(
@@ -89,7 +157,7 @@ async def _authorized_document(
 
 @router.get("/knowledge-bases")
 async def list_knowledge_bases(
-    request: Request, context: AuthContext = Depends(get_auth_context)
+    request: Request, context: Authorized
 ) -> list[dict[str, Any]]:
     repository = _repository(request)
     bases = await repository.list_knowledge_bases(context.authorized_knowledge_base_ids)
@@ -105,11 +173,11 @@ async def list_knowledge_bases(
 async def upload_document(
     kb_id: str,
     request: Request,
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
+    context: Authorized,
     title: str = Form(""),
     metadata: str = Form("{}"),
     idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=200),
-    context: AuthContext = Depends(get_auth_context),
 ) -> AcceptedUpload:
     base = await _authorized_base(request, context, kb_id)
     config = get_config()
@@ -122,8 +190,8 @@ async def upload_document(
         suffix = "." + validate_upload(content, media_type, filename=name)
         metadata_value = json.loads(metadata)
         if not isinstance(metadata_value, dict):
-            raise ValueError("Metadata must be a JSON object")
-    except (ValueError, json.JSONDecodeError) as exc:
+            raise TypeError("Metadata must be a JSON object")
+    except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     normalized_title = title.strip() or Path(name).stem
     canonical = json.dumps(
@@ -156,15 +224,15 @@ async def upload_document(
         raise HTTPException(status_code=503, detail="Knowledge job could not be registered") from exc
     if result["replayed"]:
         storage.delete(stored.key)
-    return AcceptedUpload(**result)
+    return AcceptedUpload.model_validate(result)
 
 
 @router.get("/knowledge-bases/{kb_id}/documents")
 async def list_documents(
     kb_id: str,
     request: Request,
+    context: Authorized,
     limit: int = 50,
-    context: AuthContext = Depends(get_auth_context),
 ) -> list[dict[str, Any]]:
     await _authorized_base(request, context, kb_id)
     if not 1 <= limit <= 100:
@@ -176,7 +244,7 @@ async def list_documents(
 async def list_document_versions(
     document_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> list[dict[str, Any]]:
     await _authorized_document(request, context, document_id)
     return await _repository(request).list_versions(document_id=document_id)
@@ -187,7 +255,7 @@ async def update_document_metadata(
     document_id: str,
     payload: DocumentMetadataUpdate,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> dict[str, str]:
     if payload.title is None and payload.metadata is None:
         raise HTTPException(status_code=400, detail="At least one metadata field is required")
@@ -214,9 +282,9 @@ async def update_document_metadata(
 async def replace_document_version(
     document_id: str,
     request: Request,
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
+    context: Authorized,
     idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=200),
-    context: AuthContext = Depends(get_auth_context),
 ) -> AcceptedUpload:
     scope = await _authorized_document(request, context, document_id)
     config = get_config()
@@ -260,14 +328,14 @@ async def replace_document_version(
         raise HTTPException(status_code=503, detail="Knowledge job could not be registered") from exc
     if result["replayed"]:
         storage.delete(stored.key)
-    return AcceptedUpload(**result)
+    return AcceptedUpload.model_validate(result)
 
 
 @router.get("/versions/{version_id}/quality-report")
 async def get_quality_report(
     version_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> dict[str, Any]:
     scope = await _repository(request).get_version_scope(version_id)
     if scope is None:
@@ -284,7 +352,7 @@ async def get_quality_report(
 async def get_job(
     job_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> dict[str, Any]:
     job = await _repository(request).get_job(job_id)
     if job is None:
@@ -298,8 +366,8 @@ async def get_job(
 async def list_jobs(
     kb_id: str,
     request: Request,
+    context: Authorized,
     limit: int = 50,
-    context: AuthContext = Depends(get_auth_context),
 ) -> list[dict[str, Any]]:
     await _authorized_base(request, context, kb_id)
     if not 1 <= limit <= 100:
@@ -311,7 +379,7 @@ async def list_jobs(
 async def retry_job(
     job_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> dict[str, str]:
     job = await _repository(request).get_job(job_id)
     if job is None:
@@ -329,7 +397,7 @@ async def retry_job(
 async def reindex_document(
     document_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> dict[str, str]:
     scope = await _authorized_document(request, context, document_id)
     result = await _repository(request).enqueue_reindex(
@@ -346,7 +414,7 @@ async def reindex_document(
 async def delete_document(
     document_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> dict[str, str]:
     scope = await _authorized_document(request, context, document_id)
     deleted = await _repository(request).tombstone_document(
@@ -362,7 +430,7 @@ async def activate_version(
     document_id: str,
     version_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> AcceptedOperation:
     scope = await _authorized_document(request, context, document_id)
     try:
@@ -381,7 +449,7 @@ async def activate_version(
 async def get_activation_operation(
     operation_id: str,
     request: Request,
-    context: AuthContext = Depends(get_auth_context),
+    context: Authorized,
 ) -> dict[str, str]:
     operation = await _repository(request).get_activation_operation(operation_id)
     if operation is None:

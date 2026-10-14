@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
 from threading import Lock
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -110,14 +111,17 @@ class MilvusRetrievalService:
                 continue
             if scope.knowledge_base_ids and entity.get("knowledge_base_id") not in scope.knowledge_base_ids:
                 continue
-            active = scope.active_versions.get(entity.get("document_id"))
+            document_id = entity.get("document_id")
+            if not isinstance(document_id, str):
+                continue
+            active = scope.active_versions.get(document_id)
             if active:
                 if (
                     active.document_version != entity.get("document_version")
                     or active.index_version != entity.get("index_version")
                 ):
                     continue
-            elif scope.document_versions.get(entity.get("document_id")) != entity.get("document_version"):
+            elif scope.document_versions.get(document_id) != entity.get("document_version"):
                 continue
             if (
                 not isinstance(entity.get("content"), str)
@@ -141,6 +145,8 @@ class MilvusRetrievalService:
     def _initialize(self) -> None:
         with self._init_lock:
             if self._encoder is None or self._reranker is None:
+                torch = importlib.import_module("torch")
+                torch.set_num_threads(4)
                 # Loading must stay offline; setup is an explicit operator action.
                 for configured in (self._config.embedding_model, self._config.reranker_model):
                     if not configured or not Path(configured).is_dir():
@@ -148,7 +154,7 @@ class MilvusRetrievalService:
                             "Local embedding/reranker model directory is not configured"
                         )
                 if self._encoder is None:
-                    from pymilvus.model.hybrid import BGEM3EmbeddingFunction
+                    BGEM3EmbeddingFunction = importlib.import_module("pymilvus.model.hybrid").BGEM3EmbeddingFunction
 
                     self._encoder = BGEM3EmbeddingFunction(
                         model_name=self._config.embedding_model,
@@ -156,7 +162,7 @@ class MilvusRetrievalService:
                         use_fp16=self._config.embedding_fp16,
                     )
                 if self._reranker is None:
-                    from FlagEmbedding import FlagReranker
+                    FlagReranker = importlib.import_module("FlagEmbedding").FlagReranker
 
                     self._reranker = FlagReranker(
                         model_name_or_path=self._config.reranker_model,
@@ -164,7 +170,7 @@ class MilvusRetrievalService:
                         use_fp16=self._config.reranker_fp16,
                     )
             if self._client is None:
-                from pymilvus import MilvusClient
+                MilvusClient = importlib.import_module("pymilvus").MilvusClient
 
                 self._client = MilvusClient(
                     uri=self._config.milvus_uri,
@@ -176,8 +182,9 @@ class MilvusRetrievalService:
         if self._client is not None:
             await asyncio.to_thread(self._client.close)
 
-    def _hybrid_search(self, query: str, expression: str, limit: int) -> list[dict]:
-        from pymilvus import AnnSearchRequest, WeightedRanker
+    def _hybrid_search(self, query: str, expression: str, limit: int) -> list[dict[str, Any]]:
+        milvus = importlib.import_module("pymilvus")
+        AnnSearchRequest, WeightedRanker = milvus.AnnSearchRequest, milvus.WeightedRanker
 
         with self._inference_lock:
             embeddings = self._encoder.encode_queries([query])
@@ -190,7 +197,7 @@ class MilvusRetrievalService:
             AnnSearchRequest(
                 data=[dense_vector],
                 anns_field=self._config.milvus_dense_field,
-                param={"metric_type": "IP"},
+                param={"metric_type": self._config.milvus_dense_metric},
                 expr=expression or None,
                 limit=limit,
             ),
@@ -224,7 +231,7 @@ class MilvusRetrievalService:
             ],
             timeout=self._config.milvus_timeout_seconds,
         )
-        return list(result[0]) if result else []
+        return cast(list[dict[str, Any]], list(result[0])) if result else []
 
     @staticmethod
     def _sparse_row_to_dict(matrix: Any, row: int) -> dict[int, float]:

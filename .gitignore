@@ -33,6 +33,8 @@ desktop.ini
 
 # ===== 项目运行产物 =====
 data/raw/
+data/demo-sources/
+.playwright-cli/
 logs/
 *.log
 runs/

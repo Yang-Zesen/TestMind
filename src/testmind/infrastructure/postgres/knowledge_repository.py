@@ -79,6 +79,7 @@ class KnowledgeRepository:
     ) -> dict[str, str | bool | None]:
         """Persist a source receipt before dispatching a durable sync job."""
         async with self._pool.connection() as connection, connection.transaction():
+            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"source:{event.source}:{event.source_event_id}",))
             existing = await self._fetchone(
                 connection,
                 """SELECT id, job_id FROM knowledge.change_receipts
@@ -92,7 +93,7 @@ class KnowledgeRepository:
                     "replayed": True,
                 }
 
-            document_id = str(uuid5(NAMESPACE_URL, f"testmind:{event.source}:{event.resource_id}"))
+            document_id = str(uuid5(NAMESPACE_URL, f"testmind:{event.source}:{event.project_ref}:{event.kb_ref}:{event.resource_type}:{event.resource_id}"))
             version_id, job_id, receipt_id = (str(uuid4()) for _ in range(3))
             version = f"source-{event.source_version}"
             index_version = f"index-{uuid4().hex[:12]}"
@@ -248,7 +249,7 @@ class KnowledgeRepository:
                 (
                     version_id,
                     document_id,
-                    last["number"] + 1,
+                    (last["number"] if last else 0) + 1,
                     version_id,
                     f"index-{uuid4().hex[:12]}",
                     storage_key,
@@ -331,7 +332,7 @@ class KnowledgeRepository:
         async with self._pool.connection() as connection:
             return await self._fetchone(
                 connection,
-                """SELECT v.id AS version_id, v.document_version, v.index_version, v.storage_key,
+                """SELECT v.id AS version_id, v.document_version, v.index_version, v.storage_key,v.status,
                           d.id AS document_id, d.project_id, d.kb_id, d.title, d.metadata
                    FROM knowledge.document_versions v
                    JOIN knowledge.documents d ON d.id = v.document_id
@@ -357,7 +358,7 @@ class KnowledgeRepository:
         async with self._pool.connection() as connection, connection.transaction():
                 row = await self._fetchone(
                     connection,
-                    "SELECT quality_report FROM knowledge.document_versions WHERE id = %s FOR UPDATE",
+                    "SELECT quality_report,status FROM knowledge.document_versions WHERE id = %s FOR UPDATE",
                     (version_id,),
                 )
                 if not row or row["quality_report"] is None:
@@ -396,7 +397,7 @@ class KnowledgeRepository:
             if not row:
                 return False
             await connection.execute(
-                "UPDATE knowledge.document_versions SET status = 'failed_permanent' WHERE id = %s",
+                "UPDATE knowledge.document_versions SET status = 'failed_permanent' WHERE id = %s AND status NOT IN ('ready','active','archived','rejected')",
                 (row["version_id"],),
             )
             return True
@@ -413,7 +414,7 @@ class KnowledgeRepository:
             rows = await cursor.fetchall()
             for row in rows:
                 await connection.execute(
-                    "UPDATE knowledge.document_versions SET status = 'failed_permanent' WHERE id = %s",
+                    "UPDATE knowledge.document_versions SET status = 'failed_permanent' WHERE id = %s AND status NOT IN ('ready','active','archived','rejected')",
                     (row["version_id"],),
                 )
             return len(rows)
@@ -641,7 +642,7 @@ class KnowledgeRepository:
             )
             version_status = status
             await connection.execute(
-                "UPDATE knowledge.document_versions SET status = %s WHERE id = %s",
+                "UPDATE knowledge.document_versions SET status = %s WHERE id = %s AND status NOT IN ('ready','active','archived','rejected')",
                 (version_status, job["version_id"]),
             )
             return status
@@ -704,7 +705,7 @@ class KnowledgeRepository:
                         pending["to_document_version"] == version["document_version"]
                         and pending["to_index_version"] == version["index_version"]
                     ):
-                        return pending["id"]
+                        return str(pending["id"])
                     raise InvalidVersionTransition("Another activation is already in progress")
                 current = await self._fetchone(
                     connection,
@@ -803,13 +804,13 @@ class KnowledgeRepository:
             if operation["from_document_version"]:
                 await connection.execute(
                     """UPDATE knowledge.document_versions SET status = 'archived'
-                           WHERE document_id = %s AND document_version = %s""",
-                    (operation["document_id"], operation["from_document_version"]),
+                           WHERE document_id = %s AND document_version = %s AND index_version=%s""",
+                    (operation["document_id"], operation["from_document_version"], operation["from_index_version"]),
                 )
             await connection.execute(
                 """UPDATE knowledge.document_versions SET status = 'active'
-                       WHERE document_id = %s AND document_version = %s""",
-                (operation["document_id"], operation["to_document_version"]),
+                       WHERE document_id = %s AND document_version = %s AND index_version=%s""",
+                (operation["document_id"], operation["to_document_version"], operation["to_index_version"]),
             )
             await connection.execute(
                 """UPDATE knowledge.activation_operations SET status = 'pointer_switched',
@@ -869,6 +870,7 @@ class KnowledgeRepository:
             )
 
     @staticmethod
-    async def _fetchone(connection: Any, query: str, params: tuple[Any, ...]) -> Any:
+    async def _fetchone(connection: Any, query: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
         cursor = await connection.execute(query, params)
-        return await cursor.fetchone()
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else None

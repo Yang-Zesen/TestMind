@@ -71,3 +71,27 @@ async def test_worker_schedules_retryable_infrastructure_failure():
 
     assert await worker.run_once()
     assert repository.retries[0]["error_code"] == "milvus_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_worker_cancels_handler_when_lease_is_lost():
+    repository = FakeRepository()
+    cancelled = asyncio.Event()
+
+    async def lost_lease(**kwargs):
+        return False
+
+    async def handle(job):
+        try:
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    repository.heartbeat = lost_lease
+    worker = KnowledgeWorker(repository, handlers={"ingest": handle},
+                             lease_seconds=1, heartbeat_seconds=0.01)
+    assert await worker.run_once()
+    assert cancelled.is_set()
+    assert repository.completed == []
+    assert repository.retries == []

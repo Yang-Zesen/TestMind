@@ -18,6 +18,8 @@ async def decide(
     if approval is None:
         raise HTTPException(404, "approval_not_found")
     await authorized_task(request, approval["task_id"], auth)
+    if approval.get("asset_id"):
+        raise HTTPException(409, "use_versioned_case_review")
     try:
         result = await repo.decide_approval(
             approval_id, reviewer=auth.user_id, **payload.model_dump()

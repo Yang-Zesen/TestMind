@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("component", choices=("api", "worker"))
+    parser.add_argument("component", choices=("api", "worker", "knowledge-worker"))
     parser.add_argument("--port", type=int, default=26104)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--task-id")
@@ -20,11 +20,15 @@ def main() -> None:
         import uvicorn
 
         uvicorn.run("testmind.main:app", host="127.0.0.1", port=args.port, loop="testmind.main:selector_loop_factory")
-    else:
+    elif args.component == "worker":
         from testmind.worker.task_worker import run
 
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             runner.run(run(once=args.once, task_id=args.task_id))
+    else:
+        from testmind.worker.knowledge_worker import _run_configured_worker
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            runner.run(_run_configured_worker())
 
 
 if __name__ == "__main__":

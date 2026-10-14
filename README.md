@@ -186,7 +186,18 @@ uv run python scripts/run_demo.py worker
 工作台：`http://127.0.0.1:26104/demo`；健康/就绪：`/health`、`/ready`。
 演示身份 `demo-user` / `demo-other` 对应不同项目和知识库；服务端 PG 权限支持撤销。
 离线模型和禅道读取数据是明确标注的演示适配器，复用实际主图/问答子图和工具工厂。
-演示不会调用真实模型或执行外部写入。真实身份及完整 RAG、用例发布留给后续阶段。
+知识库使用真实本地 BGE-M3、Milvus dense/sparse 混合检索与 BGE Reranker；模型路径配置在 `deploy/demo.env`，需事先安装，不会自动下载。
+问答为有引用和支持性校验的摘录适配器，用例为需求/OpenAPI 正负边界规则模板；真实生成模型质量尚未验收。
+工作台支持知识上传/替换/质量与索引报告/显式激活/撤回，以及来源、草稿编辑、逐条评审和模拟禅道发布。
+模拟禅道 ID 为持久化 `DEMO-*`；真实禅道写入仍关闭。未知结果需核实，重复提交不会盲目重发。
+
+第三个终端启动独立知识 Worker：
+
+```powershell
+uv run python scripts/run_demo.py knowledge-worker
+```
+
+任务 Worker 默认在受理任务前预热模型；CPU 首次启动约 90 秒，预热不占任务租约。知识入库只产生 ready 版本，必须显式激活后才用于检索。
 
 任务 API 提供幂等提交、查询、版本校验恢复、取消及有序 SSE；断线只结束订阅。
 Worker 使用 PG 租约/claim token，每输入版本最多 3 次执行；单次执行 60 秒，累计截止时间 180 秒保存在 PG，跨重启不重置；单节点默认 60 秒。
@@ -202,7 +213,7 @@ docker compose -f deploy/docker-compose.yaml down
 ```
 
 停止 Compose 保留命名卷；再次启动后任务、事件及 Checkpoint 仍在。
-审批基础提供版本/hash 绑定和失效，真实资产审批/发布由后续工作包接入。
+用例审批绑定当前版本/hash；编辑使旧审批失效，来源或证据版本变化阻断发布。本轮仅验收演示身份和模拟发布。
 CI 运行单元测试和新增底座的定向 Ruff，真实依赖回归使用上述本地脚本。
 
 ## 安全说明

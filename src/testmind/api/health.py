@@ -42,3 +42,10 @@ async def demo_page() -> FileResponse:
     if not get_config().demo_mode:
         raise HTTPException(404)
     return FileResponse(Path(__file__).resolve().parents[3] / "frontend" / "demo" / "index.html")
+
+
+@router.get("/demo/workflows.js", include_in_schema=False)
+async def demo_workflows() -> FileResponse:
+    if not get_config().demo_mode:
+        raise HTTPException(404)
+    return FileResponse(Path(__file__).resolve().parents[3] / "frontend" / "demo" / "workflows.js", media_type="text/javascript")

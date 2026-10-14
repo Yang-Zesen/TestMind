@@ -27,6 +27,7 @@ from testmind.orchestration.context import RequestContext
 from testmind.orchestration.state import GraphState
 from testmind.prompts.load_prompts import load_template
 from testmind.tools.update_time import _now
+from testmind.workflows.retrieval import SharedRetrievalService
 
 
 class DialogueInput(TypedDict, total=False):
@@ -195,7 +196,7 @@ def create_dialogue_graph(
             return "publish"
         return "grounded_answer" if state.get("retrieved_chunks") else "insufficient"
 
-    async def grounded_answer(state: DialogueState) -> dict[str, Any]:
+    async def grounded_answer(state: DialogueState, runtime: Runtime[RequestContext]) -> dict[str, Any]:
         chunks = [KnowledgeChunk.model_validate(item) for item in state.get("retrieved_chunks", [])]
         evidence = [
             {"chunk_id": c.chunk_id, "title": c.title, "content": c.content} for c in chunks
@@ -232,6 +233,12 @@ def create_dialogue_graph(
                 or any(ident not in by_id for ident in cited_ids)
             ):
                 return insufficient(state)
+            if getattr(llm, "extractive_only", False) and not any(result.answer.strip() in by_id[ident].content for ident in cited_ids):
+                return insufficient(state)
+            if isinstance(retriever, SharedRetrievalService) and runtime.context and runtime.context.retrieval_scope:
+                current = await retriever.current_scope(runtime.context.retrieval_scope)
+                if any(not retriever.allowed(by_id[ident], current) for ident in cited_ids):
+                    return insufficient(state)
             return {
                 **_result(result.answer.strip(), "completed", "dialogue_grounded"),
                 "citations": [
@@ -278,7 +285,7 @@ def create_dialogue_graph(
                     result = _result("Input exceeds the dialogue budget.", "failed", name, code="dialogue_input_budget_exhausted")
                 else:
                     async with asyncio.timeout(config.ai_node_timeout_seconds):
-                        result = node(state, runtime) if name == "retrieve" else node(state)
+                        result = node(state, runtime) if name in {"retrieve", "grounded_answer"} else node(state)
                         if inspect.isawaitable(result):
                             result = await result
                     if not isinstance(result, dict) or len(json.dumps(result, default=str, ensure_ascii=False)) > 32000 or ("answer" in result and (not isinstance(result["answer"], str) or len(result["answer"]) > 12000)):

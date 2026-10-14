@@ -27,6 +27,7 @@ _RESULT_FIELDS = {
     "insufficient_evidence",
     "current_stage",
     "answer_mode",
+    "case_asset_ids",
 }
 
 
@@ -129,7 +130,7 @@ class TaskWorker:
                         "needs_input": "waiting_input",
                         "insufficient_evidence": "completed",
                     }.get(graph_status, graph_status)
-                    if status not in {"completed", "waiting_input", "denied", "failed"}:
+                    if status not in {"completed", "waiting_input", "waiting_review", "denied", "failed"}:
                         status = "failed"
                     code = result.get("last_error", {}).get("code")
         except TimeoutError:
@@ -189,21 +190,31 @@ class TaskWorker:
 async def run(*, once: bool = False, task_id: str | None = None) -> None:
     from testmind.core.config import get_config
     from testmind.demo.runtime import create_demo_graph
+    from testmind.infrastructure.milvus.retrieval import MilvusRetrievalService
     from testmind.infrastructure.postgres.knowledge_repository import KnowledgeRepository
     from testmind.infrastructure.postgres.postgresql_client import open_postgresql_client
+    from testmind.services.retrieval_scope import RetrievalScopeLoader
+    from testmind.workflows.retrieval import SharedRetrievalService
 
     if not get_config().demo_mode:
         raise RuntimeError("This task Worker currently requires explicit local demo mode")
     async with open_postgresql_client() as postgres:
         repository = TaskRepository(postgres.pool)
+        knowledge = KnowledgeRepository(postgres.pool)
+        backend = MilvusRetrievalService(get_config())
+        retrieval = SharedRetrievalService(backend, refresh_scope=RetrievalScopeLoader(repository, knowledge))
+        import os
+        if os.getenv("TESTMIND_PRELOAD_RAG", "false").lower() == "true":
+            await asyncio.to_thread(backend._initialize)
         worker = TaskWorker(
             repository,
-            create_demo_graph(postgres.checkpointer, repository),
-            KnowledgeRepository(postgres.pool),
+            create_demo_graph(postgres.checkpointer, repository, retrieval),
+            knowledge,
         )
         while True:
             executed = await worker.run_once(task_id=task_id)
             if once:
+                await backend.aclose()
                 return
             if not executed:
                 await asyncio.sleep(0.5)

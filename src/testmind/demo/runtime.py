@@ -1,6 +1,7 @@
 """Offline adapters reuse the real parent graph and direct-answer subgraph."""
 
 import re
+import time
 from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage
@@ -37,6 +38,13 @@ class DemoIntentNode(BaseNode):
 
     async def process(self, state: GraphState) -> GraphState:
         query = state["corrected_query"].lower()
+        # Keep capabilities explicit in the demo: an unknown route must stop
+        # with a durable refusal instead of being answered as ordinary chat.
+        if any(word in query for word in ("脚本", "script", "自动化代码", "写代码")):
+            return {"intent": "script_generation", "status": "not_enabled",
+                    "answer": "该演示版本未启用脚本生成能力。", "answer_mode": None,
+                    "last_error": {"code": "capability_not_enabled"},
+                    "route_reason": "capability_gate"}
         if query.startswith("graph-query:") or any(word in query for word in ("图谱", "关系查询", "graph query")):
             return {"intent":"graph_query", "answer_mode":None, "last_error":{}}
         unclear = query in {"?", "help", "帮我", "这个"}
@@ -55,17 +63,33 @@ class DemoIntentNode(BaseNode):
 
 class DemoModel:
     extractive_only = True
+    def __init__(self, repository: TaskRepository | None = None) -> None:
+        self.repository = repository
+
+    async def _observe(self, started: float, failed: bool = False) -> None:
+        if self.repository is not None:
+            try:
+                await self.repository.record_metric("model", "answer", time.monotonic() - started, failed=failed)
+            except Exception:  # noqa: BLE001 - telemetry must not change answer behavior.
+                from testmind.core.logging import get_logger
+
+                get_logger(__name__).warning("demo_model_metric_write_failed")
+
     def with_structured_output(self, schema: Any) -> Any:
         from testmind.models.retrieval import GroundedAnswer
         class GroundedDemoModel:
             async def ainvoke(self, messages: list[Any]) -> Any:
                 import json
+                started = time.monotonic()
                 payload = json.loads(str(messages[1].content))
                 evidence = payload["evidence"]
+                await self_model._observe(started)
                 return GroundedAnswer(answer=evidence[0]["content"] if evidence else "", cited_chunk_ids=[evidence[0]["chunk_id"]] if evidence else [], insufficient_evidence=not bool(evidence))
+        self_model = self
         return GroundedDemoModel()
 
     async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        started = time.monotonic()
         query = str(messages[-1].content).lower()
         if "pytest" in query:
             answer = "Pytest discovers test_ files and uses assertions to compare actual and expected behavior."
@@ -77,6 +101,7 @@ class DemoModel:
             )
         else:
             answer = "This offline demonstration completed a persisted direct-answer task. Ask about pytest, idempotency or event-stream reconnects."
+        await self._observe(started)
         return AIMessage(content=answer)
 
 
@@ -130,7 +155,7 @@ def create_demo_graph(
     return create_main_graph(
         checkpointer,
         None,
-        llm=DemoModel(),
+        llm=DemoModel(repository),
         readonly_node=readonly,
         retriever=retriever,
         graph_query_node=_graph_node(repository, graph_service),

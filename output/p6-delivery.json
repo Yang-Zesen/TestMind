@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:26114",
+  "scope": "local simulation; real PG/Milvus/Neo4j/BGE",
+  "checks": [
+    "deep_ready_four_components",
+    "knowledge_upload_activation",
+    "direct",
+    "not_enabled",
+    "readonly",
+    "clarify_resume",
+    "design_review_publication",
+    "publication_to_graph",
+    "cross_user_denied",
+    "frozen_golden_3_of_4"
+  ],
+  "evaluation": [
+    {
+      "query": "How does pytest find tests?",
+      "passed": true,
+      "citations": 1
+    },
+    {
+      "query": "What does an assertion check?",
+      "passed": false,
+      "citations": 0
+    },
+    {
+      "query": "Does disconnecting the event stream restart a task?",
+      "passed": true,
+      "citations": 1
+    },
+    {
+      "query": "What is the current exchange rate?",
+      "passed": true,
+      "citations": 0
+    }
+  ]
+}

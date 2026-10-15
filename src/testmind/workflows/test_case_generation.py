@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 from testmind.infrastructure.postgres.case_repository import CaseRepository
@@ -26,6 +27,7 @@ class CaseDesignNode(BaseNode):
         query = state.get("corrected_query", state.get("raw_query", ""))
         if not query.startswith(PREFIX):
             return {"status":"needs_input", "answer":"请先选择需求或 OpenAPI 来源。", "last_error":{"code":"case_source_required"}}
+        stage = "parse_request"
         try:
             specification = json.loads(query[len(PREFIX):])
             source_ids = specification.get("source_ids") if isinstance(specification, dict) else specification
@@ -37,12 +39,14 @@ class CaseDesignNode(BaseNode):
                 raise PermissionError("case_access_denied")
             sources = []
             bodies = []
+            stage = "load_sources"
             for source_id in source_ids:
                 source = await self.repository.source(source_id)
                 if source is None or source["deleted"] or source["project_id"] != state["project_id"] or source["user_id"] != state["user_id"]:
                     raise PermissionError("case_source_access_denied")
                 sources.append(source)
                 payload = CaseSourceInput(**{key:source[key] for key in ("project_id","kind","title","content")})
+                stage = "design_cases"
                 bodies.extend(design_cases(payload))
             evidence: list[dict[str, Any]] = []
             if use_knowledge and self.retrieval is not None:
@@ -52,9 +56,13 @@ class CaseDesignNode(BaseNode):
                     bundle = await asyncio.wait_for(self.retrieval.evidence(sources[0]["title"], scope, caller_id=state["task_id"]), timeout=45)
                     evidence = [chunk.model_dump(exclude={"content", "relevance"}) for chunk in bundle.chunks]
             claim = {"id":state["task_id"], "claim_token":state["attempt_id"]}
+            stage = "persist_drafts"
             assets = await self.repository.save_drafts(claim, sources, bodies[:36], evidence)
             return {"status":"waiting_review", "answer":f"已生成 {len(assets)} 条待审核用例（本地规则草稿），请逐条核对具体输入与预期。", "current_stage":"case_review", "case_asset_ids":[asset["id"] for asset in assets], "citations":evidence, "last_error":{}}
         except PermissionError:
             return {"status":"denied", "answer":"无权访问所选用例来源。", "last_error":{"code":"case_source_access_denied"}}
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as exc:
+            logging.getLogger(__name__).warning(
+                "case_design_input_rejected stage=%s error_type=%s", stage, type(exc).__name__
+            )
             return {"status":"needs_input", "answer":"来源格式不完整或版本已变化，请重新选择来源。", "last_error":{"code":"case_source_invalid"}}

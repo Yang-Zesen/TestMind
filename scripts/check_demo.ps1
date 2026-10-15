@@ -9,3 +9,5 @@ $env:GRAPH_TEST_NEO4J_USER = 'neo4j'
 $env:GRAPH_TEST_NEO4J_PASSWORD = 'demo-no-auth'
 uv run pytest -q --tb=short
 if ($LASTEXITCODE -ne 0) { throw 'Demo regression failed' }
+uv run python scripts/measure_capacity.py
+if ($LASTEXITCODE -ne 0) { throw 'Demo queue capacity measurement failed' }

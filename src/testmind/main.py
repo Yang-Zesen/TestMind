@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from testmind.api.router import api_router
+from testmind.core.api_metrics import ApiMetricsMiddleware
 from testmind.core.authentication import DemoAuthorizationProvider
 from testmind.core.config import get_config
 from testmind.core.runtime_limits import RuntimeLimitsMiddleware
@@ -79,11 +80,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.task_repository = TaskRepository(postgres.pool)
             app.state.case_repository = CaseRepository(postgres.pool)
             app.state.case_publication = CasePublicationService(app.state.case_repository, DemoCaseWriter(app.state.case_repository)) if config.demo_mode else None
-            shared_retrieval = SharedRetrievalService(retrieval, refresh_scope=RetrievalScopeLoader(app.state.task_repository, app.state.knowledge_repository))
+            async def record_rag(metric: str, seconds: float, failed: bool) -> None:
+                await app.state.task_repository.record_metric("rag", metric, seconds, failed=failed)
+
+            shared_retrieval = SharedRetrievalService(retrieval, refresh_scope=RetrievalScopeLoader(app.state.task_repository, app.state.knowledge_repository), observe=record_rag)
             if config.knowledge_auth_mode == "demo":
                 app.state.authorization_provider = DemoAuthorizationProvider(app.state.task_repository)
             app.state.graph_sync_repository = GraphSyncRepository(postgres.pool)
             app.state.graph_query_service = None
+            app.state.graph_driver = None
             app.state.graph_event_source = None
             app.state.graph_pull_enabled = graph_settings.enabled and (graph_settings.demo_mode or bool(graph_settings.snapshot_url))
             if graph_settings.enabled:
@@ -93,6 +98,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     graph_settings.uri,
                     auth=(graph_settings.read_user, graph_settings.read_password) if not graph_settings.demo_mode else None,
                 )
+                app.state.graph_driver = graph_driver
                 app.state.graph_query_service = GraphQueryService(
                     app.state.graph_sync_repository,
                     Neo4jGraphReader(graph_driver, database=graph_settings.database),
@@ -121,7 +127,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     jev_client=jev_client,
                     retriever=shared_retrieval,
                 )
-            yield
+            from testmind.services.runtime_status import component_heartbeat
+            async with component_heartbeat(postgres.pool, "api"):
+                yield
     finally:
         app.state.zentao_service = None
         if zentao_client is not None:
@@ -137,6 +145,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(RuntimeLimitsMiddleware)
+app.add_middleware(ApiMetricsMiddleware)
 app.include_router(api_router)
 
 if __name__ == "__main__":

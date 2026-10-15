@@ -44,6 +44,12 @@ def create_main_graph(
     for node_name, node in nodes.items():
         workflow.add_node(node_name, node)
     workflow.add_node("dialogue", create_dialogue_graph(retriever, llm=llm))
+    async def unavailable(state: GraphState) -> GraphState:
+        return {"status": "not_enabled", "answer": "当前版本未启用该能力。",
+                "citations": [], "graph_result": {}, "case_asset_ids": [],
+                "last_error": {"code": "capability_not_enabled"}}
+    workflow.add_node("not_enabled", unavailable)
+    workflow.add_edge("not_enabled", END)
     if graph_query_node is not None:
         workflow.add_node("graph_query", graph_query_node)
         workflow.add_edge("graph_query", END)
@@ -58,10 +64,11 @@ def create_main_graph(
     workflow.add_edge("spell_correction", "intent_recognition")
     workflow.add_conditional_edges(
         "intent_recognition",
-        lambda state: "graph_query" if graph_query_node is not None and state.get("intent") == "graph_query" else "case_design" if case_design_node is not None and state.get("intent") == "test_case_generation" else "readonly_tools" if readonly_node is not None and state.get("intent") == "readonly_query" else route_by_intent(state),
+        lambda state: "graph_query" if graph_query_node is not None and state.get("intent") == "graph_query" else "case_design" if case_design_node is not None and state.get("intent") == "test_case_generation" else "readonly_tools" if readonly_node is not None and state.get("intent") == "readonly_query" else "not_enabled" if state.get("intent") in {"script_generation", "test_case_generation", "graph_query", "readonly_query"} else route_by_intent(state),
         {
             "coreference_resolution": "coreference_resolution",
             "clarify": "clarify",
+            "not_enabled": "not_enabled",
             **({"graph_query": "graph_query"} if graph_query_node is not None else {}),
             **({"readonly_tools": "readonly_tools"} if readonly_node is not None else {}),
             **({"case_design": "case_design"} if case_design_node is not None else {}),

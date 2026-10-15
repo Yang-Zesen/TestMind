@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -21,9 +22,18 @@ class TaskTransitionError(Exception):
     pass
 
 
+class TaskCapacityError(Exception):
+    pass
+
+
 class TaskRepository:
-    def __init__(self, pool: Any) -> None:
+    def __init__(self, pool: Any, *, queue_limit: int | None = None) -> None:
+        if queue_limit is None:
+            queue_limit = int(os.getenv("TASK_QUEUE_LIMIT_PER_USER", "128"))
+        if not 1 <= queue_limit <= 10000:
+            raise ValueError("queue_limit must be between 1 and 10000")
         self.pool = pool
+        self.queue_limit = queue_limit
 
     @staticmethod
     async def _row(connection: Any, sql: str, values: tuple[Any, ...]) -> dict[str, Any] | None:
@@ -71,6 +81,13 @@ class TaskRepository:
         ).hexdigest()
         task_id, trace_id = str(uuid4()), str(uuid4())
         async with self.pool.connection() as connection, connection.transaction():
+            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"project:{project_id}",))
+            existing = await self._row(connection, "SELECT * FROM business.tasks WHERE user_id=%s AND project_id=%s AND idempotency_key=%s", (user_id, project_id, idempotency_key))
+            if existing:
+                if existing["fingerprint"] != fingerprint:
+                    raise TaskConflict("idempotency_conflict")
+                return {**existing, "replayed": True}
+            await self._queue_capacity(connection, user_id, project_id)
             task = await self._row(
                 connection,
                 """INSERT INTO business.tasks(id,user_id,project_id,session_id,query,status,trace_id,execution_thread_id,idempotency_key,fingerprint)
@@ -101,6 +118,54 @@ class TaskRepository:
             else:
                 await self._event(connection, task_id, {"kind": "accepted"})
         return {**task, "replayed": replayed}
+
+    async def _queue_capacity(self, connection: Any, user_id: str, project_id: str) -> None:
+        row = await self._row(connection, """SELECT count(*) AS project_count,
+            count(*) FILTER(WHERE user_id=%s) AS user_count FROM business.tasks
+            WHERE project_id=%s AND status IN ('queued','running')""", (user_id, project_id))
+        assert row is not None
+        if row["user_count"] >= self.queue_limit or row["project_count"] >= 2 * self.queue_limit:
+            raise TaskCapacityError("task_queue_capacity_exceeded")
+
+    async def record_metric(self, component: str, metric: str, seconds: float, *, failed: bool = False) -> None:
+        if component not in {"worker", "rag", "model"} or metric not in {"execution", "retrieval", "answer"} or not 0 <= seconds <= 3600:
+            return
+        async with self.pool.connection() as connection:
+            await connection.execute("""INSERT INTO business.runtime_metrics
+                (component,metric,window_start,observations,failures,total_seconds,max_seconds)
+                VALUES (%s,%s,date_trunc('minute',now()),1,%s,%s,%s)
+                ON CONFLICT(component,metric,window_start) DO UPDATE SET
+                observations=business.runtime_metrics.observations+1,
+                failures=business.runtime_metrics.failures+EXCLUDED.failures,
+                total_seconds=business.runtime_metrics.total_seconds+EXCLUDED.total_seconds,
+                max_seconds=GREATEST(business.runtime_metrics.max_seconds,EXCLUDED.max_seconds)""",
+                (component, metric, int(failed), seconds, seconds))
+            await connection.execute("DELETE FROM business.runtime_metrics WHERE window_start<now()-interval '7 days'")
+
+    async def retry(self, task_id: str, *, user_id: str, expected_version: int) -> None:
+        async with self.pool.connection() as connection, connection.transaction():
+            candidate = await self._row(connection, "SELECT project_id FROM business.tasks WHERE id=%s AND user_id=%s", (task_id, user_id))
+            if candidate is None:
+                raise TaskTransitionError("task_not_found")
+            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"project:{candidate['project_id']}",))
+            task = await self._row(connection, "SELECT * FROM business.tasks WHERE id=%s AND user_id=%s FOR UPDATE", (task_id, user_id))
+            grant = await self._row(connection, "SELECT g.user_id FROM business.demo_grants g JOIN business.demo_users u USING(user_id) WHERE g.user_id=%s AND g.project_id=%s AND g.revoked=false AND u.enabled=true LIMIT 1 FOR SHARE OF g,u", (user_id, candidate["project_id"]))
+            if grant is None:
+                raise PermissionError("project_access_denied")
+            assert task is not None
+            if task["version"] != expected_version:
+                raise TaskConflict("task_version_conflict")
+            if task["status"] != "failed" or task["cancel_requested"] or task["manual_retries"] >= 3 or task["error_code"] not in {"dependency_unavailable", "task_timeout", "task_deadline_exhausted", "attempt_budget_exhausted", "task_execution_failed", "answer_unavailable", "retrieval_unavailable", "dialogue_node_timeout", "dialogue_node_failed"}:
+                raise TaskTransitionError("task_not_retryable")
+            asset = await self._row(connection, "SELECT id FROM business.case_assets WHERE task_id=%s LIMIT 1", (task_id,))
+            if asset:
+                raise TaskTransitionError("case_task_requires_review_or_reconciliation")
+            await self._queue_capacity(connection, user_id, task["project_id"])
+            await connection.execute("""UPDATE business.tasks SET status='queued',version=version+1,
+                manual_retries=manual_retries+1,attempt_count=0,result='{}',error_code=NULL,
+                execution_deadline_at=NULL,next_attempt_at=now(),execution_thread_id=%s WHERE id=%s""",
+                (f"task:{task_id}:retry:{uuid4()}", task_id))
+            await self._event(connection, task_id, {"kind": "manual_retry", "actor_id": user_id})
 
     async def get(self, task_id: str) -> dict[str, Any] | None:
         async with self.pool.connection() as connection:
@@ -259,10 +324,47 @@ class TaskRepository:
     async def history(self, task: dict[str, Any]) -> list[dict[str, Any]]:
         async with self.pool.connection() as connection:
             cursor = await connection.execute(
-                """SELECT query,answer FROM business.conversation_turns WHERE user_id=%s AND project_id=%s AND session_id=%s AND task_id<>%s ORDER BY created_at DESC LIMIT 3""",
+                """SELECT t.* FROM business.conversation_turns c JOIN business.tasks t ON t.id=c.task_id WHERE c.user_id=%s AND c.project_id=%s AND c.session_id=%s AND c.task_id<>%s ORDER BY c.created_at DESC LIMIT 3""",
                 (task["user_id"], task["project_id"], task["session_id"], task["id"]),
             )
-            return list(reversed([dict(row) for row in await cursor.fetchall()]))
+            candidates = [dict(row) for row in await cursor.fetchall()]
+        auth = await self.context(task["user_id"])
+        if auth is None:
+            return []
+        turns = []
+        for item in reversed(candidates):
+            if await self.result_accessible(item, auth):
+                turns.append({"query": item["query"], "answer": item["result"].get("answer", "")})
+        return turns
+
+    async def result_accessible(self, task: dict[str, Any], auth: AuthContext) -> bool:
+        if task["user_id"] != auth.user_id or task["project_id"] not in auth.authorized_project_ids:
+            return False
+        citations = task["result"].get("citations", [])
+        if not isinstance(citations, list) or len(citations) > 100:
+            return False
+        async with self.pool.connection() as connection:
+            for citation in citations:
+                if not isinstance(citation, dict):
+                    return False
+                kb_id = citation.get("knowledge_base_id")
+                if kb_id not in auth.authorized_knowledge_base_ids:
+                    return False
+                current = await self._row(connection, """SELECT a.document_version,a.index_version
+                    FROM knowledge.project_active_versions a JOIN knowledge.documents d ON d.id=a.document_id
+                    JOIN business.demo_grants g ON g.project_id=a.project_id AND g.kb_id=a.kb_id
+                    JOIN business.demo_users u ON u.user_id=g.user_id
+                    WHERE g.user_id=%s AND g.revoked=false AND u.enabled=true AND a.project_id=%s
+                    AND a.kb_id=%s AND a.document_id=%s AND d.tombstoned_at IS NULL""",
+                    (auth.user_id, task["project_id"], kb_id, citation.get("document_id")))
+                if current is None or current["document_version"] != citation.get("document_version") or current["index_version"] != citation.get("index_version"):
+                    return False
+            graph = task["result"].get("graph_result")
+            if graph:
+                grant = await self._row(connection, "SELECT permission_version FROM graph_sync.project_memberships WHERE project_id=%s AND user_id=%s AND revoked=false", (task["project_id"], auth.user_id))
+                if grant is None or grant["permission_version"] != graph.get("permission_version"):
+                    return False
+        return True
 
     async def create_approval(
         self, task_id: str, *, asset_version: int, content_hash: str

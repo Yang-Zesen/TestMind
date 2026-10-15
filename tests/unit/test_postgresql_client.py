@@ -22,6 +22,15 @@ async def test_client_keeps_one_checkpointer_for_app_lifetime_and_closes_pool(mo
         async def __aexit__(self, *args):
             events.append("pool_closed")
 
+        async def getconn(self):
+            class Connection:
+                async def execute(self, query):
+                    events.append("migration_lock_acquired" if "pg_advisory_lock(" in query else "migration_lock_released")
+            return Connection()
+
+        async def putconn(self, connection):
+            events.append("lock_connection_returned")
+
     class FakeSaver:
         def __init__(self, pool):
             self.pool = pool
@@ -35,9 +44,9 @@ async def test_client_keeps_one_checkpointer_for_app_lifetime_and_closes_pool(mo
 
     async with module.open_postgresql_client() as client:
         assert client.checkpointer.pool is client.pool
-        assert events == ["pool_created", "pool_opened", "tables_ready"]
+        assert events == ["pool_created", "pool_opened", "migration_lock_acquired", "tables_ready", "migration_lock_released", "lock_connection_returned"]
 
-    assert events == ["pool_created", "pool_opened", "tables_ready", "pool_closed"]
+    assert events == ["pool_created", "pool_opened", "migration_lock_acquired", "tables_ready", "migration_lock_released", "lock_connection_returned", "pool_closed"]
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from testmind.api.tasks import Authorized, authorized_task, repository, view
 from testmind.core.security import require_project_access
 from testmind.infrastructure.postgres.case_repository import CaseConflict, CaseRepository
-from testmind.infrastructure.postgres.task_repository import TaskConflict
+from testmind.infrastructure.postgres.task_repository import TaskCapacityError, TaskConflict
 from testmind.models.test_case import (
     CaseDesignRequest,
     CaseEdit,
@@ -75,8 +75,7 @@ async def edit_source(source_id: str, payload: SourceEdit, request: Request, aut
 @router.delete("/case-sources/{source_id}")
 async def delete_source(source_id: str, request: Request, auth: Authorized) -> dict[str, Any]:
     source = await authorized_source(source_id, request, auth)
-    async with case_repository(request).pool.connection() as connection:
-        await connection.execute("UPDATE business.case_sources SET deleted=true,version=version+1,updated_at=now() WHERE id=%s AND deleted=false", (source_id,))
+    await case_repository(request).delete_source(source_id, auth.user_id)
     return {"id":source["id"], "status":"deleted"}
 
 
@@ -91,6 +90,8 @@ async def design(payload: CaseDesignRequest, request: Request, auth: Authorized,
         task = await repository(request).submit(user_id=auth.user_id, project_id=payload.project_id, session_id=payload.session_id, query=PREFIX + json.dumps({"source_ids":payload.source_ids,"use_knowledge":payload.use_knowledge}), idempotency_key=key)
     except TaskConflict as exc:
         raise HTTPException(409, str(exc)) from None
+    except TaskCapacityError as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": "5"}) from None
     return view(task)
 
 

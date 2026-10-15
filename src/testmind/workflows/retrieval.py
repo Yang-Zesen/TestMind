@@ -1,5 +1,6 @@
 """Shared evidence graph, independent of intent and answer generation."""
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
@@ -10,6 +11,7 @@ from testmind.infrastructure.milvus.retrieval import Retriever
 from testmind.models.retrieval import EvidenceBundle, KnowledgeChunk, RetrievalScope
 
 ScopeLoader = Callable[[RetrievalScope], Awaitable[RetrievalScope]]
+MetricObserver = Callable[[str, float, bool], Awaitable[None]]
 
 
 class RetrievalState(TypedDict, total=False):
@@ -21,9 +23,11 @@ class RetrievalState(TypedDict, total=False):
 
 
 class SharedRetrievalService:
-    def __init__(self, backend: Retriever, *, refresh_scope: ScopeLoader | None = None):
+    def __init__(self, backend: Retriever, *, refresh_scope: ScopeLoader | None = None,
+                 observe: MetricObserver | None = None):
         self.backend = backend
         self.refresh_scope = refresh_scope
+        self.observe = observe
         graph = StateGraph(RetrievalState)
         graph.add_node("retrieve_evidence", self._retrieve)
         graph.add_edge(START, "retrieve_evidence")
@@ -49,6 +53,23 @@ class SharedRetrievalService:
         ) and chunk.source_locator.strip() and chunk.content.strip())
 
     async def _retrieve(self, state: RetrievalState) -> dict[str, EvidenceBundle]:
+        started = time.monotonic()
+        failed = False
+        try:
+            return await self._retrieve_checked(state)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            if self.observe is not None:
+                try:
+                    await self.observe("retrieval", time.monotonic() - started, failed)
+                except Exception:  # noqa: BLE001 - telemetry must not fail retrieval.
+                    from testmind.core.logging import get_logger
+
+                    get_logger(__name__).warning("retrieval_metric_write_failed")
+
+    async def _retrieve_checked(self, state: RetrievalState) -> dict[str, EvidenceBundle]:
         scope = await self.current_scope(state["scope"])
         chunks = await self.backend.retrieve(state["query"], scope, limit=state["limit"])
         current = await self.current_scope(scope)

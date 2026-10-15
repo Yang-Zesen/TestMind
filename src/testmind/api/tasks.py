@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from testmind.core.security import AuthContext, get_auth_context, require_project_access
 from testmind.infrastructure.postgres.task_repository import (
+    TaskCapacityError,
     TaskConflict,
     TaskRepository,
     TaskTransitionError,
@@ -40,6 +41,7 @@ def view(task: dict[str, Any]) -> dict[str, Any]:
                 "version",
                 "input_version",
                 "attempt_count",
+                "manual_retries",
                 "cancel_requested",
                 "result",
                 "error_code",
@@ -50,11 +52,13 @@ def view(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def authorized_task(request: Request, task_id: str, auth: AuthContext) -> dict[str, Any]:
+async def authorized_task(request: Request, task_id: str, auth: AuthContext, *, expose_result: bool = True) -> dict[str, Any]:
     task = await repository(request).get(task_id)
     if task is None or task["user_id"] != auth.user_id:
         raise HTTPException(404, "task_not_found")
     require_project_access(auth, task["project_id"])
+    if expose_result and not await repository(request).result_accessible(task, auth):
+        raise HTTPException(403, "task_result_access_changed")
     await require_graph_result_access(request, task, auth)
     return task
 
@@ -83,6 +87,8 @@ async def submit(
         )
     except TaskConflict as exc:
         raise HTTPException(409, str(exc)) from None
+    except TaskCapacityError as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": "5"}) from None
     return {
         "task_id": task["id"],
         "trace_id": task["trace_id"],
@@ -95,6 +101,8 @@ async def submit(
 async def list_tasks(request: Request, auth: Authorized) -> list[dict[str, Any]]:
     items = []
     for task in await repository(request).list_tasks(auth.user_id, auth.authorized_project_ids):
+        if not await repository(request).result_accessible(task, auth):
+            continue
         try:
             await require_graph_result_access(request, task, auth)
         except HTTPException as exc:
@@ -114,22 +122,43 @@ async def get_task(task_id: str, request: Request, auth: Authorized) -> dict[str
 async def resume(
     task_id: str, payload: TaskResume, request: Request, auth: Authorized
 ) -> dict[str, Any]:
-    await authorized_task(request, task_id, auth)
+    await authorized_task(request, task_id, auth, expose_result=False)
     try:
         await repository(request).resume(task_id, **payload.model_dump())
     except (TaskConflict, TaskTransitionError) as exc:
         raise HTTPException(409, str(exc)) from None
-    return view(await authorized_task(request, task_id, auth))
+    task = await authorized_task(request, task_id, auth, expose_result=False)
+    return {**view(task), "result": {}}
 
 
 @router.post("/{task_id}/cancel", status_code=202)
 async def cancel(task_id: str, request: Request, auth: Authorized) -> dict[str, Any]:
-    await authorized_task(request, task_id, auth)
+    await authorized_task(request, task_id, auth, expose_result=False)
     try:
         await repository(request).cancel(task_id)
     except TaskTransitionError as exc:
         raise HTTPException(409, str(exc)) from None
-    return view(await authorized_task(request, task_id, auth))
+    task = await authorized_task(request, task_id, auth, expose_result=False)
+    return {**view(task), "result": {}}
+
+
+class RetryInput(TaskResume):
+    query: str = ""
+
+
+@router.post("/{task_id}/retry", status_code=202)
+async def retry(task_id: str, payload: RetryInput, request: Request, auth: Authorized) -> dict[str, Any]:
+    await authorized_task(request, task_id, auth, expose_result=False)
+    try:
+        await repository(request).retry(task_id, user_id=auth.user_id, expected_version=payload.expected_version)
+    except PermissionError:
+        raise HTTPException(403, "project_access_denied") from None
+    except (TaskConflict, TaskTransitionError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    except TaskCapacityError as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": "5"}) from None
+    task = await authorized_task(request, task_id, auth, expose_result=False)
+    return {**view(task), "result": {}}
 
 
 @router.get("/{task_id}/events")

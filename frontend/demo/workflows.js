@@ -114,3 +114,41 @@ el('graph-sync-refresh').onclick=()=>refreshGraphStatus().catch(fail);
 el('graph-cleanup-preview').onclick=async()=>{try{const user=el('user').value;const preview=await api(`/api/v1/graph/maintenance-preview?project_id=${project()}`);if(user!==el('user').value)return;el('evidence-title').textContent='旧代际清理预览';el('evidence-content').textContent=JSON.stringify(preview,null,2);el('evidence-dialog').showModal();}catch(e){fail(e);}};
 el('user').addEventListener('change',()=>{graphCursor=null;graphJobs=[];el('graph-output').replaceChildren();el('graph-jobs').replaceChildren();el('graph-status').textContent='';el('graph-maintenance').hidden=true;refreshGraphAccess().catch(fail);});
 refreshGraphAccess().catch(fail);
+
+const runtimeSection = document.createElement('section');
+runtimeSection.id = 'runtime-section'; runtimeSection.hidden = true;
+runtimeSection.append(text('h2', '运行状态'));
+const runtimeOutput = document.createElement('div'); runtimeOutput.id = 'runtime-output';
+runtimeSection.append(command('刷新运行状态', async () => {
+  const user = el('user').value;
+  const status = await api(`/api/v1/operations?project_id=${project()}`);
+  if (user !== el('user').value) return;
+  runtimeOutput.replaceChildren();
+  for (const component of status.components) runtimeOutput.append(text('p', `${component.component} · ${component.healthy ? '正常' : '离线'}${component.model_ready ? ' · 模型就绪' : ''}`));
+  for (const [name, rows] of Object.entries(status.queues)) runtimeOutput.append(text('p', `${name}：${rows.map(row => `${row.status} ${row.count}`).join(' · ') || '暂无任务'}`));
+  for (const alert of status.alerts) runtimeOutput.append(text('p', `告警：${alert.component} · ${alert.code}`));
+  const values = status.api.latency_seconds;
+  runtimeOutput.append(text('p', `API P50 ${values.p50?.toFixed(3) ?? '-'}s · P95 ${values.p95?.toFixed(3) ?? '-'}s · P99 ${values.p99?.toFixed(3) ?? '-'}s`));
+  for (const failure of status.failures) runtimeOutput.append(text('p', `${failure.id.slice(0, 8)} · ${failure.error_code || failure.status} · trace ${failure.trace_id}`));
+  for (const metric of status.metrics_last_hour) runtimeOutput.append(text('p', `${metric.component} ${metric.metric}：${metric.observations} 次 · 失败 ${metric.failures} · 平均 ${(metric.total_seconds / metric.observations).toFixed(3)}s · 最大 ${metric.max_seconds.toFixed(3)}s`));
+}), runtimeOutput);
+document.querySelector('main').append(runtimeSection);
+const oldAccess = refreshGraphAccess;
+refreshGraphAccess = async () => { await oldAccess(); runtimeSection.hidden = el('graph-maintenance').hidden; };
+el('user').addEventListener('change', () => { runtimeSection.hidden = true; runtimeOutput.replaceChildren(); });
+refreshGraphAccess().catch(fail);
+
+const retryButton = command('重试任务', async () => {
+  await api(`/api/v1/tasks/${current}/retry`, {method: 'POST', body: JSON.stringify({expected_version: version})});
+  await detail(); await refresh(); if (subscription) subscription.abort(); watch(current);
+});
+retryButton.hidden = true; el('cancel').before(retryButton);
+const previousDetail = detail;
+detail = async () => {
+  retryButton.hidden = true;
+  const task = await previousDetail();
+  if (!task) return task;
+  retryButton.hidden = task.status !== 'failed' || task.manual_retries >= 3 || !['dependency_unavailable','task_timeout','task_deadline_exhausted','attempt_budget_exhausted','task_execution_failed','answer_unavailable','retrieval_unavailable','dialogue_node_timeout','dialogue_node_failed'].includes(task.error_code);
+  if (task.status === 'not_enabled') el('cancel').disabled = true;
+  return task;
+};

@@ -1,0 +1,433 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Microsoft YaHei, sans-serif","fontSize":"15px","primaryColor":"#f2f4f7","primaryBorderColor":"#667085","primaryTextColor":"#182230","lineColor":"#667085"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":42,"useMaxWidth":false}}}%%
+flowchart TB
+    subgraph DEMO[2026-10-14 本地 P0-P6：真实 BGE与PG-Neo4j / 演示身份与模拟来源发布]
+        DEMO_AUTH[两用户/两项目 PG 演示授权与撤权] --> DEMO_TASK[任务/审批/事件/幂等持久化]
+        DEMO_TASK --> DEMO_WORKER[独立 PG 租约 Worker / 累计截止时间]
+        DEMO_WORKER --> DEMO_GRAPH[复用主图 + direct问答 / 澄清恢复]
+        DEMO_WORKER --> DEMO_TOOLS[复用禅道只读工具工厂 / 三道门 / 离线数据]
+        DEMO_TASK --> DEMO_SSE[Last-Event-ID 补读 / 断线不重跑]
+        DEMO_GRAPH --> DEMO_AUDIT[结构化决策元数据 / 两类有限恢复 / 不记录隐藏思维链]
+        DEMO_TOOLS --> DEMO_AUDIT
+        DEMO_STACK[TestMind Compose: PG / Milvus / etcd / MinIO / Neo4j]
+        DEMO_GRAPH --> DEMO_RAG[私有 RetrievalState / EvidenceBundle / 前后授权和版本复核]
+        DEMO_RAG --> DEMO_BGE[真实本地 BGE-M3 / Milvus dense+sparse / Reranker]
+        DEMO_BGE --> DEMO_CITE[摘录问答 / 合法引用 / 支持性校验 / 引用跳转]
+        DEMO_STACK --> DEMO_KNOWLEDGE[独立知识 Worker / 有界解析 / ready 后显式激活]
+        DEMO_KNOWLEDGE --> DEMO_VERSION[替换 / reindex / 删除 / 激活重放]
+        DEMO_SOURCE[模拟自动来源 / 增量水位 / source_sync 收据] --> DEMO_KNOWLEDGE
+        DEMO_GRAPH --> DEMO_CASE[需求 / OpenAPI 快照 / 正负边界规则草稿]
+        DEMO_CASE --> DEMO_REVIEW[逐条编辑 / 批准 / 拒绝 / 版本 hash / 失效校验]
+        DEMO_REVIEW --> DEMO_PUBLISH[持久化操作账本 / 本地模拟禅道 DEMO-ID]
+        DEMO_PUBLISH --> DEMO_RECONCILE[未知结果待核实 / 不重复发送]
+        DEMO_GRAPH --> DEMO_GQUERY[私有 GraphQueryState / 受限资产关系指标 / 无任意 Cypher]
+        DEMO_GQUERY --> DEMO_GAUTH[PG 角色与版本关系复核 / 历史结果撤权 / 无历史趋势推断]
+        DEMO_STACK --> DEMO_GWORKER[独立图谱 Worker / 模拟项目成员需求用例缺陷]
+        DEMO_GWORKER --> DEMO_GPROJECTION[独立分页水位 / 删除墓碑 / 真实 PG-Neo4j 投影]
+        DEMO_GPROJECTION --> DEMO_GMAINTAIN[对账与损坏修复 / 授权租约栅栏 / 校验后代际切换]
+        DEMO_GMAINTAIN --> DEMO_GPREVIEW[旧代际保留至少24小时 / 仅清理预览]
+        DEMO_TASK --> DEMO_P5[未启用能力持久化终态 / 历史结果按当前授权与知识版本复核]
+        DEMO_CASE --> DEMO_OUTBOX[来源/草稿/审批/模拟ID 与图谱 Outbox 同 PG 事务]
+        DEMO_OUTBOX --> DEMO_GPROJECTION
+        DEMO_STACK --> DEMO_P6[独立 Compose / 不可变迁移 / 模型指纹 / 深度就绪]
+        DEMO_P6 --> DEMO_RUNTIME[组件心跳 / 有界队列与有限重试 / 项目运维面板]
+        DEMO_RUNTIME --> DEMO_RECOVERY[离线 PG 与源文件备份 / 新库还原 / Neo4j 代际和 Milvus 重建]
+        DEMO_RUNTIME --> DEMO_EVAL[固定检索评估 3/4；低证据安全拒答，不宣称质量通过]
+        DEMO_LIMIT[企业身份 / 真实生成模型质量 / 真实禅道源与写入 / 多机与生产容量：后续验收]
+    end
+    class DEMO_AUTH,DEMO_TASK,DEMO_WORKER,DEMO_GRAPH,DEMO_TOOLS,DEMO_SSE,DEMO_AUDIT,DEMO_STACK,DEMO_P5,DEMO_OUTBOX,DEMO_P6,DEMO_RUNTIME,DEMO_RECOVERY done;
+    class DEMO_RAG,DEMO_BGE,DEMO_CITE,DEMO_KNOWLEDGE,DEMO_VERSION,DEMO_SOURCE,DEMO_CASE,DEMO_REVIEW,DEMO_PUBLISH,DEMO_RECONCILE done;
+    class DEMO_GQUERY,DEMO_GAUTH,DEMO_GWORKER,DEMO_GPROJECTION,DEMO_GMAINTAIN,DEMO_GPREVIEW done;
+    class DEMO_EVAL partial;
+    subgraph MAIN[统一主图：任务受理与条件分派]
+        direction TB
+        USER[用户 / Streamlit] --> ACCEPT[FastAPI 任务受理与可信上下文]
+        ACCEPT --> NORMALIZE[拼写纠错与 JEV 意图识别]
+        NORMALIZE --> ROUTER{候选意图有效且置信度足够?}
+        ROUTER -->|低置信度 / 信息不足| CLARIFY[澄清、Checkpoint 与等待状态]
+        CLARIFY -->|补充后恢复| NORMALIZE
+        ROUTER -->|是| POLICY{服务端授权与能力白名单通过?}
+        POLICY -->|否| DENY[权限拒绝 / 不调用下游]
+        POLICY -->|是| DISPATCH[按候选意图受限分派]
+    end
+    subgraph BUSINESS[业务子图：各自隔离状态，按条件进入]
+        direction LR
+    subgraph DIALOGUE[知识问答]
+        direction TB
+    D_IN[问题、历史与 RequestContext] --> D_COREF[仅问答分支：指代消解]
+    D_COREF --> D_MODE{answer_mode}
+    D_MODE -->|direct| D_DIRECT[普通技术问答]
+    D_MODE -->|retrieval| D_RAG[[调用共享 RAG]]
+    D_RAG --> D_STATUS{证据状态}
+    D_STATUS -->|ok| D_ANSWER[基于本次证据生成回答]
+    D_STATUS -->|empty| D_EMPTY[明确证据不足]
+    D_STATUS -->|denied / failed| D_ERROR[权限拒绝或服务失败]
+    D_DIRECT --> D_OUT[回答、引用与状态返回主图]
+    D_ANSWER --> D_OUT
+    D_EMPTY --> D_OUT
+    D_ERROR --> D_OUT
+    class D_COREF,D_MODE,D_DIRECT done;
+
+    end
+    subgraph RAG[共享 RAG 检索]
+        direction TB
+    R_IN[query、top_k 与可信范围] --> R_AUTH[项目、文档 ACL 与有效版本校验]
+    R_AUTH --> R_ALLOWED{允许检索?}
+    R_ALLOWED -->|否| R_DENIED[status = denied]
+    R_ALLOWED -->|是| R_EMBED[BGE-M3 查询向量化<br/>一次生成 dense 1024 维与 sparse 权重]
+    R_EMBED --> R_DENSE[稠密召回<br/>dense_vector / IP]
+    R_EMBED --> R_SPARSE[稀疏召回<br/>sparse_vector / IP]
+    R_DENSE --> R_FUSION[hybrid_search / WeightedRanker 融合]
+    R_SPARSE --> R_FUSION
+    R_FUSION --> R_CHECK[去重与返回数据权限 / 版本复核]
+    R_CHECK --> R_RERANK[BGE Reranker<br/>相关度阈值与 Top-K]
+    R_RERANK --> R_EVIDENCE[EvidenceBundle<br/>chunks、来源、版本、位置、分数与状态]
+    R_DENIED --> R_OUT[返回原调用子图]
+    R_EVIDENCE --> R_OUT
+    class R_AUTH,R_EMBED,R_DENSE,R_SPARSE,R_FUSION,R_CHECK,R_RERANK done;
+
+    end
+    subgraph CASES[用例设计与评审]
+        direction TB
+    C_IN[需求 / API / 已有测试资产] --> C_SNAPSHOT[来源解析与版本快照]
+    C_SNAPSHOT --> C_FACTORS[提取因子、边界、风险与业务断言]
+    C_FACTORS --> C_NEED{需要历史证据?}
+    C_NEED -->|是| C_RAG[[共享 RAG]]
+    C_NEED -->|否| C_DRAFT[生成正向、负向与边界用例]
+    C_RAG -->|证据返回本子图| C_DRAFT
+    C_DRAFT --> C_COVERAGE[覆盖检查与缺口提示]
+    C_COVERAGE --> C_REVIEW{人工逐条评审}
+    C_REVIEW -->|修改 / 补充| C_DRAFT
+    C_REVIEW -->|拒绝| C_REJECT[保留草稿与评审意见]
+    C_REVIEW -->|批准| C_WRITE[授权复核与幂等写入禅道]
+    C_WRITE --> C_SYNC{写入结果}
+    C_SYNC -->|成功| C_OUT[正式 ID、来源版本与审计返回主图]
+    C_SYNC -->|失败| C_RETRY[保留草稿、错误与待同步状态]
+
+    end
+    subgraph GRAPH[关系查询与指标]
+        direction TB
+    G_IN[查询类型与结构化参数] --> G_SCOPE[解析项目范围与授权上下文]
+    G_SCOPE --> G_VALIDATE[允许的查询模板、参数与成本校验]
+    G_VALIDATE --> G_SAFE{查询可执行?}
+    G_SAFE -->|否| G_DENIED[拒绝越权或非受控查询]
+    G_SAFE -->|是| G_QUERY[Neo4j 参数化只读查询]
+    G_QUERY --> G_RECHECK[PostgreSQL 权限与有效版本复核]
+    G_RECHECK --> G_METRICS[先过滤再统计<br/>保留来源、时间与同步水位]
+    G_METRICS --> G_OUT[关系 / 指标 / 查询审计返回主图]
+    G_DENIED --> G_OUT
+
+    end
+    subgraph PLAN[测试策略、计划与报告 · 暂缓]
+        direction TB
+    P_IN[需求、版本、风险与测试目标] --> P_STRATEGY[策略、覆盖范围与准入 / 退出标准]
+    P_STRATEGY --> P_REVIEW{负责人审核}
+    P_REVIEW -->|修改| P_STRATEGY
+    P_REVIEW -->|批准| P_PLAN[版本化测试计划与任务编排]
+    P_PLAN --> P_PREP[[环境、数据与资产验证]]
+    P_PLAN --> P_SPECIAL[[获批专项任务]]
+    P_PREP --> P_RUN[[脚本生成与隔离执行]]
+    P_RUN --> P_EVIDENCE[汇集运行、缺陷与回归证据]
+    P_SPECIAL --> P_EVIDENCE
+    P_EVIDENCE --> P_DRAFT[报告草稿、覆盖缺口与残余风险]
+    P_DRAFT --> P_REPORT{报告评审}
+    P_REPORT -->|修改| P_DRAFT
+    P_REPORT -->|批准| P_PUBLISH[发布版本与受控通知]
+    P_CHANGE[需求 / 版本变更] -->|影响分析与重新批准| P_STRATEGY
+    class P_IN,P_STRATEGY,P_REVIEW,P_PLAN,P_PREP,P_SPECIAL,P_RUN,P_EVIDENCE,P_DRAFT,P_REPORT,P_PUBLISH,P_CHANGE deferred;
+
+    end
+    subgraph PREP[环境、数据与资产验证 · 暂缓]
+        direction TB
+    E_IN[计划、环境与资产版本] --> E_ENV[环境登记、连通性与依赖检查]
+    E_ENV --> E_DATA[数据模板、脱敏与任务命名空间]
+    E_DATA --> E_SNAPSHOT[固定环境 / 数据 / 用例版本]
+    E_SNAPSHOT --> E_VALIDATE[API / UI 受控 dry-run 验证]
+    E_VALIDATE --> E_RESULT{验证结果}
+    E_RESULT -->|通过| E_READY[供运行前门禁消费]
+    E_RESULT -->|失败| E_REVIEW[证据与失败原因返回评审]
+    E_RESULT -->|定位器问题且策略允许| E_HEAL[当前运行定位器修复与留痕]
+    E_HEAL --> E_VALIDATE
+    E_HEAL --> E_APPROVE{批准更新基线?}
+    E_APPROVE -->|是| E_BASELINE[形成新的资产版本]
+    class E_IN,E_ENV,E_DATA,E_SNAPSHOT,E_VALIDATE,E_RESULT,E_READY,E_REVIEW,E_HEAL,E_APPROVE,E_BASELINE deferred;
+
+    end
+    subgraph SCRIPT[脚本生成与隔离执行 · 暂缓]
+        direction TB
+    S_IN[已确认用例与来源版本] --> S_CONTEXT[模板、环境、凭据引用与断言组装]
+    S_CONTEXT --> S_GENERATE[生成 pytest / HTTPX 脚本]
+    S_GENERATE --> S_STATIC[语法、依赖、断言与风险检查]
+    S_STATIC --> S_VALID{校验通过?}
+    S_VALID -->|否| S_GENERATE
+    S_VALID -->|是| S_APPROVE{脚本与执行范围审批}
+    S_APPROVE -->|拒绝 / 修改| S_GENERATE
+    S_APPROVE -->|批准| S_GATE[复核 hash、权限、环境与数据版本]
+    S_GATE --> S_PASS{门禁通过?}
+    S_PASS -->|否| S_BLOCK[阻断并保存原因]
+    S_PASS -->|是| S_RUN[隔离 Worker 执行]
+    S_RUN --> S_EVIDENCE[日志、断言、响应、截图与运行状态]
+    S_EVIDENCE --> S_OUT[返回主图或报告阶段]
+    S_EVIDENCE -->|失败且请求分析| S_QUALITY[[失败分析与缺陷回归]]
+    class S_IN,S_CONTEXT,S_GENERATE,S_STATIC,S_VALID,S_APPROVE,S_GATE,S_PASS,S_BLOCK,S_RUN,S_EVIDENCE,S_OUT,S_QUALITY deferred;
+
+    end
+    subgraph SECURITY[安全测试与漏洞处置 · 暂缓]
+        direction TB
+    V_IN[安全测试请求] --> V_AUTH{资产、方法与有效期授权}
+    V_AUTH -->|无效 / 越界| V_BLOCK[拒绝并审计]
+    V_AUTH -->|有效| V_TOOL[工具版本、配置与隔离派发]
+    V_TOOL --> V_FINDINGS[发现、原始证据与验证等级]
+    V_FINDINGS --> V_COVERAGE[实际覆盖、排除项与完成状态]
+    V_COVERAGE --> V_REVIEW{人工确认与修复评审}
+    V_REVIEW -->|确认发现| V_ISSUE[幂等缺陷草稿 / 获批提单]
+    V_ISSUE --> V_RETEST[同目标与可比配置复测]
+    V_RETEST --> V_DECISION[关闭 / 保留 / 重开及前后证据]
+    V_DECISION --> V_GATE[CI / PR 门禁与受控导出]
+    V_GATE --> V_OUT[汇入计划、报告与反馈]
+    class V_IN,V_AUTH,V_BLOCK,V_TOOL,V_FINDINGS,V_COVERAGE,V_REVIEW,V_ISSUE,V_RETEST,V_DECISION,V_GATE,V_OUT deferred;
+
+    end
+    subgraph PERFORMANCE[性能测试 · 暂缓]
+        direction TB
+    F_IN[性能目标、环境与负载方案] --> F_AUTH{权限、范围与资源限制有效?}
+    F_AUTH -->|否| F_BLOCK[拒绝并保存原因]
+    F_AUTH -->|是| F_TOOL[Locust 等工具适配与任务派发]
+    F_TOOL --> F_RUN[按批准负载执行并采集指标]
+    F_RUN --> F_REPORT[工具 / 版本 / run_id 与原始报告]
+    F_REPORT --> F_CHECK[完成状态、覆盖与阈值评估]
+    F_CHECK --> F_OUT[专项结果汇入报告与主图]
+    class F_IN,F_AUTH,F_BLOCK,F_TOOL,F_RUN,F_REPORT,F_CHECK,F_OUT deferred;
+
+    end
+    subgraph QUALITY[失败分析与缺陷回归 · 暂缓]
+        direction TB
+    Q_IN[失败运行与版本化证据] --> Q_ANALYZE[根因假设、证据与可信度]
+    Q_ANALYZE --> Q_REVIEW{缺陷去重与人工确认}
+    Q_REVIEW -->|证据不足| Q_PENDING[保留未定状态]
+    Q_REVIEW -->|批准| Q_ISSUE[关联已有缺陷或幂等提单]
+    Q_ISSUE --> Q_FIX[关联已确认修复版本 / 变更]
+    Q_FIX --> Q_IMPACT[关系驱动的影响分析与建议套件]
+    Q_IMPACT --> Q_SELECT{负责人审核回归集}
+    Q_SELECT -->|批准| Q_RUN[[复用运行门禁与隔离执行]]
+    Q_RUN --> Q_COMPARE[修复前后与基线证据比较]
+    Q_COMPARE --> Q_DECIDE{关闭 / 重开 / 保留}
+    Q_DECIDE --> Q_OUT[回归结果、未覆盖项与残余风险]
+    Q_OUT -->|确认资产且独立准入批准| Q_FEEDBACK[[知识 / 训练反馈准入]]
+    class Q_IN,Q_ANALYZE,Q_REVIEW,Q_PENDING,Q_ISSUE,Q_FIX,Q_IMPACT,Q_SELECT,Q_RUN,Q_COMPARE,Q_DECIDE,Q_OUT,Q_FEEDBACK deferred;
+
+    end
+    end
+    subgraph OUTPUT[统一结果出口]
+        direction TB
+        RESULT[结果归一化、权限复核与明确终态] --> SAVE[保存审计、状态与产物引用]
+        SAVE --> RETURN[返回结果 / SSE / 可查询任务状态]
+    end
+    subgraph BACKGROUND[独立后台工作流：持久化任务与独立触发入口]
+        direction LR
+    subgraph KNOWLEDGE[独立工作流：知识入库与版本维护]
+        direction TB
+    K_MANUAL[手动上传 / 更新 / 删除] --> K_REGISTER[授权、去重、版本与作业登记]
+    K_EVENT[禅道自动变更入口] --> K_REGISTER
+    K_REGISTER --> K_WORKER[持久化调度、租约与有限重试]
+    K_WORKER --> K_STORE[受控原件存储]
+    K_STORE --> K_PARSE[解析、页码与格式转换]
+    K_PARSE --> K_CHUNK[切块、元数据与稳定 chunk_id]
+    K_CHUNK --> K_EMBED[BGE-M3 文档向量化<br/>同次生成 dense 与 sparse]
+    K_EMBED --> K_INDEX[Milvus inactive 写入与索引验收]
+    K_INDEX --> K_QUALITY{质量与索引验收通过?}
+    K_QUALITY -->|否| K_REJECT[拒绝 / 失败状态与质量报告]
+    K_QUALITY -->|是| K_READY[ready，等待显式激活]
+    K_READY --> K_ACTIVATE[可恢复激活操作与 PG active mapping]
+    K_ACTIVATE --> K_VISIBLE[新版本可检索，旧版本撤回]
+    K_CHANGE[重建 / 逻辑删除] -->|reindex| K_WORKER
+    K_CHANGE -->|删除| K_TOMBSTONE[PG tombstone 与可见映射撤销]
+    class K_MANUAL,K_REGISTER,K_WORKER,K_CHUNK,K_EMBED,K_INDEX,K_READY,K_ACTIVATE,K_CHANGE,K_TOMBSTONE done;
+    class K_EVENT,K_STORE,K_PARSE partial;
+
+    end
+    subgraph SYNC[独立工作流：关系同步与维护]
+        direction TB
+    Y_EVENT[Webhook / 轮询补偿] --> Y_VERIFY[验签、项目映射与 receipt 去重]
+    Y_LOCAL[TestMind 事务事件 / Outbox] --> Y_REGISTER[持久化同步任务登记]
+    Y_VERIFY --> Y_REGISTER
+    Y_REGISTER --> Y_CLAIM[独立 Worker claim、租约与心跳]
+    Y_CLAIM --> Y_NORMALIZE[实体、关系、版本、ACL 与水位归一化]
+    Y_NORMALIZE --> Y_PG[PostgreSQL 权威快照]
+    Y_PG --> Y_NEO[参数化 Cypher 更新 / 撤回投影]
+    Y_NEO --> Y_RESULT{同步结果}
+    Y_RESULT -->|成功| Y_WATERMARK[保存水位、状态与审计]
+    Y_RESULT -->|可重试| Y_RETRY[有限退避重试]
+    Y_RETRY --> Y_CLAIM
+    Y_RESULT -->|最终失败| Y_FAILED[保留失败状态与人工恢复入口]
+    Y_RECONCILE[对账 / 代际重建] --> Y_REGISTER
+
+    end
+    subgraph LEARNING[独立工作流：反馈准入与模型治理 · 暂缓]
+        direction TB
+    L_IN[确认资产、反馈与失败分类] --> L_CLEAN[授权、脱敏、去重与人工标注]
+    L_CLEAN --> L_REVIEW{准入审批}
+    L_REVIEW -->|知识准入| L_KNOWLEDGE[[知识版本入库]]
+    L_REVIEW -->|训练准入| L_SPLIT[训练 / 验证 / 测试隔离]
+    L_SPLIT --> L_TRAIN[失败分类模型训练与版本登记]
+    L_TRAIN --> L_EVAL[独立评估集与质量门槛]
+    L_EVAL --> L_PASS{评估及发布批准?}
+    L_PASS -->|否| L_REJECT[保留评估证据，禁止发布]
+    L_PASS -->|是| L_RELEASE[模型发布、适用范围与回滚]
+    L_RAG[检索策略候选] --> L_RAGEVAL[独立 RAG 评估与验收]
+    L_RAGEVAL --> L_RELEASE
+    L_POLICY[获批供应商、版本与出域策略] --> L_RELEASE
+    class L_IN,L_CLEAN,L_REVIEW,L_KNOWLEDGE,L_SPLIT,L_TRAIN,L_EVAL,L_PASS,L_REJECT,L_RELEASE,L_RAG,L_RAGEVAL,L_POLICY deferred;
+
+    end
+    subgraph SCHEDULER[独立工作流：自动调度与报告通知 · 暂缓]
+        direction TB
+    T_TIMER[周期 / 事件 / CI 触发] --> T_CHECK[计划、授权、批准版本与有效期复核]
+    T_CHECK --> T_VALID{任务仍有效?}
+    T_VALID -->|否| T_BLOCK[拒绝派发与审计]
+    T_VALID -->|是| T_DISPATCH[幂等登记与队列派发]
+    T_DISPATCH --> T_WORKFLOW[[对应业务子图 / 运行门禁]]
+    T_WORKFLOW --> T_RESULT[业务结果与报告评审]
+    T_RESULT --> T_NOTICE[脱敏、平台映射与受控通知]
+    T_NOTICE --> T_SENT{同步成功?}
+    T_SENT -->|否| T_RETRY[只重试通知，不重跑业务]
+    T_RETRY --> T_NOTICE
+    T_SENT -->|是| T_DONE[保存外部引用与同步状态]
+    class T_TIMER,T_CHECK,T_VALID,T_BLOCK,T_DISPATCH,T_WORKFLOW,T_RESULT,T_NOTICE,T_SENT,T_RETRY,T_DONE deferred;
+
+    end
+    end
+    subgraph CROSSCUTTING[横切企业能力：作用于 API、全部子图及 Worker，完整层暂缓]
+        direction TB
+    subgraph X_L1[安全、身份与数据治理]
+        direction LR
+        X_SSO[企业身份 / 权限矩阵] --- X_SECRET[密钥、脱敏与数据生命周期] --- X_SUPPLY[合规与供应链安全]
+    end
+    subgraph X_L2[Agent 与 AI 治理]
+        direction LR
+        X_TOOLS[仅工具 / 受保护数据 / 副作用：服务端授权白名单 → 受限提议 → 执行前后复核] --- X_BOUNDS[所有 AI 节点：输入 / 输出边界、截止时间、终态] --- X_MODEL[模型 / Prompt 版本与回滚] --- X_EVAL[评估、护栏与 Token 预算]
+    end
+    subgraph X_L3[可观测性与运维]
+        direction LR
+        X_TRACE[结构化决策事件、结果 / 停止原因 / 错误码；禁止隐藏思维链] --- X_ALERT[SLI / SLO、仪表盘与告警] --- X_OPS[Runbook、值班与复盘]
+    end
+    subgraph X_L4[可靠性与集成治理]
+        direction LR
+        X_STATE[状态机、幂等与任务恢复] --- X_RETRY[依赖指数退避重试与 AI 结构化自修复分开限次；未知写结果先核实] --- X_ADAPTER[Outbox、补偿与连接器契约]
+    end
+    subgraph X_L5[数据一致性与灾备]
+        direction LR
+        X_VERSION[版本、激活、撤回与对账] --- X_MIGRATE[缓存失效与 Schema 兼容] --- X_BACKUP[备份恢复、RPO / RTO 与演练]
+    end
+    subgraph X_L6[工程交付、质量与容量]
+        direction LR
+        X_RELEASE[环境、配置、CI/CD 与灰度] --- X_TEST[测试与 AI 评估发布门禁] --- X_CAPACITY[配额、压测、成本与弹性]
+    end
+    X_L1 ~~~ X_L2
+    X_L2 ~~~ X_L3
+    X_L3 ~~~ X_L4
+    X_L4 ~~~ X_L5
+    X_L5 ~~~ X_L6
+    class X_SSO,X_SECRET,X_SUPPLY,X_TOOLS,X_BOUNDS,X_MODEL,X_EVAL,X_TRACE,X_ALERT,X_OPS,X_STATE,X_RETRY,X_ADAPTER,X_VERSION,X_MIGRATE,X_BACKUP,X_RELEASE,X_TEST,X_CAPACITY deferred;
+    class X_TOOLS,X_BOUNDS,X_TRACE,X_RETRY scope;
+    style X_L1 fill:#fffafb,stroke:#c62828
+    style X_L2 fill:#fffafb,stroke:#c62828
+    style X_L3 fill:#fffafb,stroke:#c62828
+    style X_L4 fill:#fffafb,stroke:#c62828
+    style X_L5 fill:#fffafb,stroke:#c62828
+    style X_L6 fill:#fffafb,stroke:#c62828
+
+    end
+    subgraph INFRA[基础设施与数据权威]
+        direction LR
+        PG[(PostgreSQL<br/>任务、版本、审批、审计与有效映射)]
+        MV[(Milvus<br/>dense / sparse 派生索引)]
+        NEO[(Neo4j<br/>可重建关系投影)]
+        FILES[(受控文件存储 / MinIO<br/>原件与执行证据)]
+        CACHE[(Redis 可选<br/>缓存与临时状态)]
+        MODELS[获批 LLM / JEV / 本地 BGE<br/>版本与数据出域策略]
+        PG ~~~ MV
+        MV ~~~ NEO
+        NEO ~~~ FILES
+        FILES ~~~ CACHE
+        CACHE ~~~ MODELS
+    end
+    subgraph LEGEND[状态图例：沿用节点实现状态，整图不代表生产验收]
+        direction LR
+        DONE[已实现]:::done ~~~ PARTIAL[部分实现]:::partial
+        PARTIAL ~~~ SCOPE[纳入范围、待实现或待验证]:::scope
+        SCOPE ~~~ DEFERRED[暂缓]:::deferred
+    end
+
+    DISPATCH -->|问答| DIALOGUE
+    DISPATCH -->|生成用例| CASES
+    DISPATCH -->|图谱查询| GRAPH
+    DISPATCH -. 策略 / 计划 / 报告 .-> PLAN
+    DISPATCH -. 环境 / 数据 / 资产准备 .-> PREP
+    DISPATCH -. 脚本生成 / 执行 .-> SCRIPT
+    DISPATCH -. 安全测试 .-> SECURITY
+    DISPATCH -. 性能测试 .-> PERFORMANCE
+    DISPATCH -. 失败分析 / 修复回归 .-> QUALITY
+    DIALOGUE --> RESULT
+    CASES --> RESULT
+    GRAPH --> RESULT
+    PLAN -.-> RESULT
+    PREP -.-> RESULT
+    SCRIPT -.-> RESULT
+    SECURITY -.-> RESULT
+    PERFORMANCE -.-> RESULT
+    QUALITY -.-> RESULT
+
+    D_RAG -. 同次调用，证据返回 D_STATUS .-> RAG
+    C_RAG -. 同次调用，证据返回 C_DRAFT .-> RAG
+    C_OUT -. 显式请求且版本 / 授权有效 .-> SCRIPT
+    P_PREP -. 获批计划 .-> PREP
+    P_SPECIAL -. 专项授权 .-> SECURITY
+    P_SPECIAL -. 性能环境与负载授权 .-> PERFORMANCE
+    P_RUN -. 审批与运行门禁 .-> SCRIPT
+    E_READY -. 供运行门禁消费 .-> SCRIPT
+    S_QUALITY -. 失败证据 .-> QUALITY
+    Q_RUN -. 获批回归复用执行 .-> SCRIPT
+    S_OUT -. 运行证据汇入 P_EVIDENCE .-> PLAN
+    V_OUT -. 专项结果汇入 P_EVIDENCE .-> PLAN
+    F_OUT -. 专项结果汇入 P_EVIDENCE .-> PLAN
+    Q_OUT -. 回归结果汇入 P_EVIDENCE .-> PLAN
+    Q_FEEDBACK -. 独立准入审批 .-> LEARNING
+    L_KNOWLEDGE -. 知识准入已批准 .-> KNOWLEDGE
+    T_WORKFLOW -. 获批任务，执行仍复核 .-> SCRIPT
+    P_PUBLISH -. 只同步获批报告 .-> SCHEDULER
+
+    KNOWLEDGE -. 文档 / 版本权威 .-> PG
+    KNOWLEDGE -. 向量写入 .-> MV
+    KNOWLEDGE -. 原件存储 .-> FILES
+    SYNC -. 权威资产 / 水位 .-> PG
+    SYNC -. 参数化投影 .-> NEO
+    RAG -. 授权与有效版本 .-> PG
+    RAG -. 两路混合检索 .-> MV
+    GRAPH -. 只读查询投影 .-> NEO
+    GRAPH -. 权限复核 .-> PG
+    SAVE -. 持久化 .-> PG
+    OUTPUT ~~~ BACKGROUND
+    BACKGROUND ~~~ CROSSCUTTING
+    CROSSCUTTING ~~~ INFRA
+    INFRA ~~~ LEGEND
+
+    classDef default fill:#f2f4f7,stroke:#667085,color:#182230;
+    classDef done fill:#dff3e5,stroke:#348054,color:#182230;
+    classDef partial fill:#fff4ce,stroke:#b8860b,color:#182230;
+    classDef scope fill:#f2f4f7,stroke:#667085,color:#182230;
+    classDef deferred fill:#fff0f0,stroke:#c62828,color:#a51e1e;
+    style DIALOGUE fill:#ffffff,stroke:#98a2b3
+    style RAG fill:#ffffff,stroke:#98a2b3
+    style CASES fill:#ffffff,stroke:#98a2b3
+    style GRAPH fill:#ffffff,stroke:#98a2b3
+    style PLAN fill:#fffafb,stroke:#c62828
+    style PREP fill:#fffafb,stroke:#c62828
+    style SCRIPT fill:#fffafb,stroke:#c62828
+    style SECURITY fill:#fffafb,stroke:#c62828
+    style PERFORMANCE fill:#fffafb,stroke:#c62828
+    style QUALITY fill:#fffafb,stroke:#c62828
+    style KNOWLEDGE fill:#ffffff,stroke:#98a2b3
+    style SYNC fill:#ffffff,stroke:#98a2b3
+    style LEARNING fill:#fffafb,stroke:#c62828
+    style SCHEDULER fill:#fffafb,stroke:#c62828
+    style CROSSCUTTING fill:#fffafb,stroke:#c62828

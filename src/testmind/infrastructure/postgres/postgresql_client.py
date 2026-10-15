@@ -37,6 +37,14 @@ async def open_postgresql_client() -> AsyncIterator[PostgresSQLClient]:
         kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row, "connect_timeout": 5, "options": "-c statement_timeout=5000"},
     )
     async with pool:
-        checkpointer = AsyncPostgresSaver(pool)
-        await checkpointer.setup()
+        migration_connection = await pool.getconn()
+        try:
+            await migration_connection.execute("SELECT pg_advisory_lock(hashtextextended('testmind:langgraph-checkpointer-migrations',0))")
+            checkpointer = AsyncPostgresSaver(pool)
+            try:
+                await checkpointer.setup()
+            finally:
+                await migration_connection.execute("SELECT pg_advisory_unlock(hashtextextended('testmind:langgraph-checkpointer-migrations',0))")
+        finally:
+            await pool.putconn(migration_connection)
         yield PostgresSQLClient(pool=pool, checkpointer=checkpointer)

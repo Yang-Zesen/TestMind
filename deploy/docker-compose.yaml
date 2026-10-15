@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: testmind
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "127.0.0.1:15432:5432"
+      - "127.0.0.1:${TESTMIND_POSTGRES_PORT:-15432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -55,8 +55,8 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
     ports:
-      - "127.0.0.1:29530:19530"
-      - "127.0.0.1:29091:9091"
+      - "127.0.0.1:${TESTMIND_MILVUS_PORT:-29530}:19530"
+      - "127.0.0.1:${TESTMIND_MILVUS_HEALTH_PORT:-29091}:9091"
     volumes:
       - milvus-data:/var/lib/milvus
     depends_on:
@@ -78,8 +78,8 @@ services:
       NEO4J_server_memory_heap_max__size: 512m
       NEO4J_server_memory_pagecache_size: 256m
     ports:
-      - "127.0.0.1:17474:7474"
-      - "127.0.0.1:17687:7687"
+      - "127.0.0.1:${TESTMIND_NEO4J_HTTP_PORT:-17474}:7474"
+      - "127.0.0.1:${TESTMIND_NEO4J_PORT:-17687}:7687"
     volumes:
       - neo4j-data:/data
     healthcheck:

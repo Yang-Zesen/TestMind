@@ -4,13 +4,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 TRANSITIONS = {
     "queued": {"running", "cancelled"},
-    "running": {"waiting_input", "waiting_review", "completed", "denied", "failed", "needs_reconciliation", "cancelled", "queued"},
+    "running": {"waiting_input", "waiting_review", "completed", "denied", "failed", "needs_reconciliation", "cancelled", "queued", "not_enabled"},
     "waiting_input": {"queued", "cancelled"},
     "waiting_review": {"queued", "rejected", "cancelled"},
     "failed": {"queued"},
     "needs_reconciliation": {"completed", "failed", "waiting_review"},
 }
-TERMINAL = frozenset({"completed", "denied", "failed", "rejected", "cancelled"})
+TERMINAL = frozenset({"completed", "denied", "failed", "rejected", "cancelled", "not_enabled"})
 
 
 def allowed_transition(before: str, after: str) -> bool:

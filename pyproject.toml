@@ -84,3 +84,6 @@ explicit_package_bases = true # 明确包根，减少隐式命名空间误判
 # 任意工作目录均可 `from testmind.state import ...`
 [tool.hatch.build.targets.wheel]
 packages = ["src/testmind"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"frontend/demo" = "testmind/demo/static"

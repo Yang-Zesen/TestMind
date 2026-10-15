@@ -129,6 +129,9 @@ async def run_worker() -> None:
         )
         previous = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, lambda *_: worker.stop())
+        from testmind.services.runtime_status import component_heartbeat
+        heartbeat = component_heartbeat(pool, "graph-worker")
+        await heartbeat.__aenter__()
         try:
             if demo_source is None:
                 await worker.run()
@@ -146,6 +149,7 @@ async def run_worker() -> None:
                         with suppress(TimeoutError):
                             await asyncio.wait_for(worker.stopping.wait(), 2)
         finally:
+            await heartbeat.__aexit__(None, None, None)
             signal.signal(signal.SIGINT, previous)
 
 

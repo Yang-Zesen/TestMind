@@ -34,6 +34,10 @@ desktop.ini
 # ===== 项目运行产物 =====
 data/raw/
 data/demo-sources/
+data/acceptance-sources/
+output/runtime/
+output/backups/
+output/model-manifest.json
 .playwright-cli/
 logs/
 *.log
@@ -61,6 +65,25 @@ htmlcov/
 
 ## ===== 文档 ======
 docs/
+!docs/
+docs/*
+!docs/02-产品需求文档PRD-v2.0.md
+!docs/04-技术设计文档TDD.md
+!docs/diagrams/
+docs/diagrams/*
+!docs/diagrams/TestMind-MVP范围说明.md
+!docs/diagrams/TestMind-节点实现状态核对.md
+!docs/diagrams/TestMind-单页完整流程.mmd
+!docs/diagrams/TestMind-单页完整流程.drawio
+!docs/SOP/
+docs/SOP/*
+!docs/SOP/P5-P6-本地演示验收-2026-10-14.md
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+docs/superpowers/plans/*
+!docs/superpowers/plans/2026-10-13-core-mvp-delivery.md
+!docs/superpowers/plans/2026-10-14-p5-p6-demo-delivery.md
 
 # ===== 其他 =======
 .obsidian/

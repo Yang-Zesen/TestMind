@@ -11,10 +11,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("component", choices=("api", "worker", "knowledge-worker", "graph-worker"))
     parser.add_argument("--port", type=int, default=26104)
+    parser.add_argument("--env-file", default="deploy/demo.env")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--task-id")
     args = parser.parse_args()
-    load_dotenv("deploy/demo.env", override=True)
+    load_dotenv(args.env_file, override=True)
     os.environ["PYTHON_DOTENV_DISABLED"] = "true"
     if args.component == "api":
         import uvicorn

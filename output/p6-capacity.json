@@ -1,0 +1,15 @@
+{
+  "environment": "local demo PostgreSQL",
+  "requests": 256,
+  "accepted": 128,
+  "capacity_rejected": 128,
+  "queue_limit_per_user": 128,
+  "elapsed_seconds": 26.437,
+  "accepted_per_second": 4.84,
+  "admission_latency_seconds": {
+    "p50": 20.32,
+    "p95": 25.75,
+    "p99": 26.156
+  },
+  "scope": "one local host; admission/PG only, no model inference"
+}

@@ -225,14 +225,20 @@ async def _run_configured_worker() -> None:
         loop = asyncio.get_running_loop()
         previous_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(worker.stop))
+        from testmind.services.runtime_status import component_heartbeat
         try:
-            if poller is None:
-                await worker.run()
-            else:
-                while not worker._stopping.is_set():
-                    await poller.poll()
-                    if not await worker.run_once():
-                        await asyncio.sleep(2)
+            async with component_heartbeat(pool, "knowledge-worker", model_ready=True):
+                if poller is None:
+                    await worker.run()
+                else:
+                    while not worker._stopping.is_set():
+                        try:
+                            await poller.poll()
+                            if not await worker.run_once():
+                                await asyncio.sleep(2)
+                        except Exception:  # noqa: BLE001 - durable jobs retain bounded retries.
+                            logger.error("knowledge_queue_unavailable")
+                            await asyncio.sleep(2)
         finally:
             signal.signal(signal.SIGINT, previous_handler)
             with suppress(Exception):

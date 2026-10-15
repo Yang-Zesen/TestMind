@@ -76,6 +76,7 @@ class TaskWorker:
             "answer": "",
             "citations": [],
             "graph_result": {},
+            "case_asset_ids": [],
             "retry_count": 0,
             "last_error": {},
         }
@@ -109,6 +110,7 @@ class TaskWorker:
         emit_decision_event(_LOGGER, "task_started", **fields, outcome="running")
         result: dict[str, Any] = {}
         code, status, retry_seconds = None, "failed", 0.0
+        started = asyncio.get_running_loop().time()
         execution = asyncio.create_task(self._execute(task))
         remaining = min(self.timeout, float(task["budget_remaining"]))
         try:
@@ -131,8 +133,9 @@ class TaskWorker:
                     status = {
                         "needs_input": "waiting_input",
                         "insufficient_evidence": "completed",
+                        "not_enabled": "not_enabled",
                     }.get(graph_status, graph_status)
-                    if status not in {"completed", "waiting_input", "waiting_review", "denied", "failed"}:
+                    if status not in {"completed", "waiting_input", "waiting_review", "denied", "failed", "not_enabled"}:
                         status = "failed"
                     code = result.get("last_error", {}).get("code")
         except TimeoutError:
@@ -177,6 +180,8 @@ class TaskWorker:
                 stop_reason="stale_lease",
             )
             return True
+        await self.repository.record_metric("worker", "execution",
+            asyncio.get_running_loop().time() - started, failed=status in {"failed", "denied"})
         emit_decision_event(
             _LOGGER,
             "task_stopped",
@@ -204,7 +209,10 @@ async def run(*, once: bool = False, task_id: str | None = None) -> None:
         repository = TaskRepository(postgres.pool)
         knowledge = KnowledgeRepository(postgres.pool)
         backend = MilvusRetrievalService(get_config())
-        retrieval = SharedRetrievalService(backend, refresh_scope=RetrievalScopeLoader(repository, knowledge))
+        async def record_rag(metric: str, seconds: float, failed: bool) -> None:
+            await repository.record_metric("rag", metric, seconds, failed=failed)
+
+        retrieval = SharedRetrievalService(backend, refresh_scope=RetrievalScopeLoader(repository, knowledge), observe=record_rag)
         import os
         if os.getenv("TESTMIND_PRELOAD_RAG", "false").lower() == "true":
             await asyncio.to_thread(backend._initialize)
@@ -221,15 +229,23 @@ async def run(*, once: bool = False, task_id: str | None = None) -> None:
             create_demo_graph(postgres.checkpointer, repository, retrieval, graph_service),
             knowledge,
         )
-        while True:
-            executed = await worker.run_once(task_id=task_id)
-            if once:
-                await backend.aclose()
-                if driver is not None:
-                    await driver.close()
-                return
-            if not executed:
-                await asyncio.sleep(0.5)
+        from testmind.services.runtime_status import component_heartbeat
+        try:
+            async with component_heartbeat(postgres.pool, "worker", model_ready=backend._encoder is not None):
+                while True:
+                    try:
+                        executed = await worker.run_once(task_id=task_id)
+                    except Exception:  # noqa: BLE001 - transient PG errors leave durable claims recoverable.
+                        _LOGGER.error("task_queue_unavailable")
+                        executed = False
+                    if once:
+                        return
+                    if not executed:
+                        await asyncio.sleep(0.5)
+        finally:
+            await backend.aclose()
+            if driver is not None:
+                await driver.close()
 
 
 if __name__ == "__main__":
